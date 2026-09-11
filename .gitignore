@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+.DS_Store
+Thumbs.db
+*.lnk
+.env
+.env.*
+*.local.json
