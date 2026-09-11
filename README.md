@@ -37,7 +37,7 @@ pythonw codex_usage_hud.py
 
 ## 配置
 
-文件：`%USERPROFILE%\\.codex_usage_hud.json`
+文件：`%USERPROFILE%\.codex_usage_hud.json`
 
 ```json
 {
