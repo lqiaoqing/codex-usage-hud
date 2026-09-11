@@ -36,6 +36,93 @@ DEFAULT_REFRESH_SEC = 60
 MIN_REFRESH_SEC = 5
 MAX_REFRESH_SEC = 3600
 
+STRINGS = {
+    "en": {
+        "window_title": "CODEX // USAGE",
+        "brand": "CODEX.USAGE",
+        "boot": "boot sequence...",
+        "syncing": "syncing telemetry...",
+        "online": "SYS.ONLINE",
+        "interval": "INTERVAL={sec}s",
+        "card5": "PRIMARY  //  5H WINDOW",
+        "card7": "SECONDARY  //  7D WINDOW",
+        "card5_compact": "5H",
+        "card7_compact": "7D",
+        "awaiting": "awaiting telemetry",
+        "refresh_label": "REFRESH.SEC",
+        "apply": "APPLY",
+        "pin": "PIN",
+        "sync_now": "SYNC NOW",
+        "open_usage": "OPEN USAGE",
+        "compact": "COMPACT",
+        "detail": "DETAIL",
+        "sync": "SYNC",
+        "lang_switch": "中文",
+        "used_line": "USED {used:.1f}%   RESET IN {reset}",
+        "fault": "FAULT // {msg}",
+        "meta_ok": "{email}   PLAN={plan}   STATE={status}   @{checked_at}",
+        "state_ok": "OK",
+        "state_limit": "LIMIT",
+        "extra": (
+            "credits.balance        {balance}\n"
+            "credits.has            {has_credits}   unlimited={unlimited}\n"
+            "banked.resets          {banked_resets}   applicable={banked_applicable}\n"
+            "reached.type           {reached_type}\n"
+            "source                 chatgpt.com/backend-api/wham/usage\n"
+            "note                   5h AND 7d must both have remaining quota"
+        ),
+        "err_missing_auth": "MISSING ~/.codex/auth.json — login Codex first",
+        "err_apikey": "API-key login has no ChatGPT 5h/7d windows",
+        "err_missing_tokens": "auth.json missing access_token / account_id",
+        "err_expired": "session expired — re-login Codex",
+        "err_refresh": "refresh failed: {err}",
+        "err_http": "HTTP {code}: {detail}",
+        "err_request": "request failed: {err}",
+    },
+    "zh": {
+        "window_title": "CODEX // 用量",
+        "brand": "CODEX.USAGE",
+        "boot": "正在启动...",
+        "syncing": "正在同步额度...",
+        "online": "系统在线",
+        "interval": "间隔={sec}秒",
+        "card5": "主额度  //  5小时",
+        "card7": "周额度  //  7天",
+        "card5_compact": "5小时",
+        "card7_compact": "7天",
+        "awaiting": "等待数据",
+        "refresh_label": "刷新间隔(秒)",
+        "apply": "应用",
+        "pin": "置顶",
+        "sync_now": "立即同步",
+        "open_usage": "打开用量页",
+        "compact": "简洁",
+        "detail": "详细",
+        "sync": "同步",
+        "lang_switch": "EN",
+        "used_line": "已用 {used:.1f}%   {reset} 后重置",
+        "fault": "故障 // {msg}",
+        "meta_ok": "{email}   套餐={plan}   状态={status}   @{checked_at}",
+        "state_ok": "正常",
+        "state_limit": "已达上限",
+        "extra": (
+            "积分余额                {balance}\n"
+            "是否有积分              {has_credits}   不限量={unlimited}\n"
+            "储蓄重置次数            {banked_resets}   可用={banked_applicable}\n"
+            "触达类型                {reached_type}\n"
+            "数据来源                chatgpt.com/backend-api/wham/usage\n"
+            "说明                    5小时和7天额度都要有剩余才能继续用"
+        ),
+        "err_missing_auth": "缺少 ~/.codex/auth.json，请先登录 Codex",
+        "err_apikey": "API Key 登录没有 ChatGPT 的 5小时/7天额度",
+        "err_missing_tokens": "auth.json 缺少 access_token 或 account_id",
+        "err_expired": "登录已过期，请重新登录 Codex",
+        "err_refresh": "刷新令牌失败：{err}",
+        "err_http": "HTTP {code}: {detail}",
+        "err_request": "请求失败：{err}",
+    },
+}
+
 
 def load_ui_config() -> dict:
     data = _read_json(CONFIG_PATH) or {}
@@ -50,6 +137,8 @@ def load_ui_config() -> dict:
     data.setdefault("topmost", True)
     mode = str(data.get("mode") or "detail").lower()
     data["mode"] = "compact" if mode == "compact" else "detail"
+    lang = str(data.get("lang") or "en").lower()
+    data["lang"] = "zh" if lang in ("zh", "zh-cn", "zh_cn", "cn", "chinese") else "en"
     return data
 
 
@@ -162,7 +251,7 @@ def fetch_usage() -> tuple[str, dict | None]:
         return f"request failed: {e}", None
 
 
-def _fmt_duration(seconds: int | float | None) -> str:
+def _fmt_duration(seconds: int | float | None, lang: str = "en") -> str:
     if seconds is None:
         return "--"
     try:
@@ -172,6 +261,12 @@ def _fmt_duration(seconds: int | float | None) -> str:
     d, rem = divmod(s, 86400)
     h, remaining = divmod(rem, 3600)
     m, sec = divmod(remaining, 60)
+    if lang == "zh":
+        if d:
+            return f"{d}天 {h:02d}小时 {m:02d}分"
+        if h:
+            return f"{h:02d}小时 {m:02d}分 {sec:02d}秒"
+        return f"{m:02d}分 {sec:02d}秒"
     if d:
         return f"{d}d {h:02d}h {m:02d}m"
     if h:
@@ -256,24 +351,50 @@ class Hud(tk.Tk):
         self._font_mono = tkfont.Font(family="Consolas", size=9)
         self._font_big = tkfont.Font(family="Consolas", size=20, weight="bold")
         self._font_tiny = tkfont.Font(family="Consolas", size=8)
+        self._apply_fonts()
+        self.title(self.t("window_title"))
 
         self._build()
         self.after(120, self.refresh_now)
         threading.Thread(target=self._loop, daemon=True).start()
         self.after(250, self._pulse)
 
+    def lang(self) -> str:
+        return "zh" if str(self._cfg.get("lang") or "en") == "zh" else "en"
+
+    def t(self, key: str, **kwargs) -> str:
+        table = STRINGS.get(self.lang()) or STRINGS["en"]
+        text = table.get(key) or STRINGS["en"].get(key) or key
+        if kwargs:
+            try:
+                return text.format(**kwargs)
+            except Exception:
+                return text
+        return text
+
+    def _apply_fonts(self):
+        zh = self.lang() == "zh"
+        family = "Microsoft YaHei" if zh else "Consolas"
+        self._font_title.configure(family=family, size=12 if zh else 13, weight="bold")
+        self._font_mono.configure(family=family, size=9)
+        self._font_big.configure(family=family, size=18 if zh else 20, weight="bold")
+        self._font_tiny.configure(family=family, size=8)
+
     def _build(self):
         header = tk.Frame(self, bg=BG)
         header.pack(fill="x", padx=14, pady=(12, 6))
-        tk.Label(header, text="CODEX.USAGE", fg=CYAN, bg=BG, font=self._font_title).pack(side="left")
-        self.hdr_status = tk.Label(header, text="SYS.ONLINE", fg=MUTED, bg=BG, font=self._font_tiny)
+        self.brand = tk.Label(header, text=self.t("brand"), fg=CYAN, bg=BG, font=self._font_title)
+        self.brand.pack(side="left")
+        self.hdr_status = tk.Label(header, text=self.t("online"), fg=MUTED, bg=BG, font=self._font_tiny)
         self.hdr_status.pack(side="right")
+        self.lang_btn = self._btn(header, self.t("lang_switch"), self.toggle_lang)
+        self.lang_btn.pack(side="right", padx=(0, 8))
 
-        self.meta = tk.Label(self, text="boot sequence...", fg=MUTED, bg=BG, font=self._font_mono, anchor="w", justify="left")
+        self.meta = tk.Label(self, text=self.t("boot"), fg=MUTED, bg=BG, font=self._font_mono, anchor="w", justify="left")
         self.meta.pack(fill="x", padx=14)
 
-        self.card5 = self._card("PRIMARY  //  5H WINDOW")
-        self.card7 = self._card("SECONDARY  //  7D WINDOW")
+        self.card5 = self._card(self.t("card5"))
+        self.card7 = self._card(self.t("card7"))
 
         extra = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
         self.extra_wrap = extra
@@ -296,7 +417,8 @@ class Hud(tk.Tk):
         ctrl = tk.Frame(self, bg=BG)
         self.ctrl = ctrl
         ctrl.pack(fill="x", padx=14, pady=(0, 6))
-        tk.Label(ctrl, text="REFRESH.SEC", fg=MUTED, bg=BG, font=self._font_tiny).pack(side="left")
+        self.refresh_label = tk.Label(ctrl, text=self.t("refresh_label"), fg=MUTED, bg=BG, font=self._font_tiny)
+        self.refresh_label.pack(side="left")
         self.refresh_var = tk.StringVar(value=str(self._cfg["refresh_sec"]))
         entry = tk.Entry(
             ctrl,
@@ -313,11 +435,12 @@ class Hud(tk.Tk):
         )
         entry.pack(side="left", padx=(8, 4))
         entry.bind("<Return>", lambda e: self.apply_refresh())
-        self._btn(ctrl, "APPLY", self.apply_refresh).pack(side="left", padx=4)
+        self.apply_btn = self._btn(ctrl, self.t("apply"), self.apply_refresh)
+        self.apply_btn.pack(side="left", padx=4)
         self.topmost_var = tk.BooleanVar(value=bool(self._cfg.get("topmost", True)))
-        tk.Checkbutton(
+        self.pin_btn = tk.Checkbutton(
             ctrl,
-            text="PIN",
+            text=self.t("pin"),
             variable=self.topmost_var,
             command=self._toggle_topmost,
             bg=BG,
@@ -326,14 +449,17 @@ class Hud(tk.Tk):
             activebackground=BG,
             activeforeground=CYAN,
             font=self._font_tiny,
-        ).pack(side="right")
+        )
+        self.pin_btn.pack(side="right")
 
         btns = tk.Frame(self, bg=BG)
         self.btns = btns
         btns.pack(fill="x", padx=14, pady=(0, 12))
-        self._btn(btns, "SYNC NOW", self.refresh_now).pack(side="left")
-        self._btn(btns, "OPEN USAGE", lambda: webbrowser.open(USAGE_PAGE)).pack(side="left", padx=8)
-        self.mode_btn = self._btn(btns, "COMPACT", self.toggle_mode)
+        self.sync_btn = self._btn(btns, self.t("sync_now"), self.refresh_now)
+        self.sync_btn.pack(side="left")
+        self.open_btn = self._btn(btns, self.t("open_usage"), lambda: webbrowser.open(USAGE_PAGE))
+        self.open_btn.pack(side="left", padx=8)
+        self.mode_btn = self._btn(btns, self.t("compact"), self.toggle_mode)
         self.mode_btn.pack(side="right")
 
         self.apply_mode()
@@ -365,7 +491,7 @@ class Hud(tk.Tk):
         title_l.pack(side="left")
         pct = tk.Label(head, text="00%", fg=CYAN, bg=PANEL, font=self._font_big)
         pct.pack(side="right")
-        detail = tk.Label(wrap, text="awaiting telemetry", fg=TEXT, bg=PANEL, font=self._font_mono, anchor="w")
+        detail = tk.Label(wrap, text=self.t("awaiting"), fg=TEXT, bg=PANEL, font=self._font_mono, anchor="w")
         detail.pack(fill="x", padx=10)
         meter = Meter(wrap, height=16)
         meter.pack(fill="x", padx=10, pady=(6, 10))
@@ -384,13 +510,36 @@ class Hud(tk.Tk):
         self._cfg["refresh_sec"] = sec
         save_ui_config(self._cfg)
         self._next_due = time.monotonic() + sec
-        self.hdr_status.configure(text=f"interval={sec}s")
+        self.hdr_status.configure(text=self.t("interval", sec=sec))
 
     def _toggle_topmost(self):
         on = bool(self.topmost_var.get())
         self.attributes("-topmost", on)
         self._cfg["topmost"] = on
         save_ui_config(self._cfg)
+
+    def toggle_lang(self):
+        self._cfg["lang"] = "zh" if self.lang() == "en" else "en"
+        save_ui_config(self._cfg)
+        self.apply_lang()
+
+    def apply_lang(self):
+        self._apply_fonts()
+        self.title(self.t("window_title"))
+        self.brand.configure(text=self.t("brand"))
+        self.lang_btn.configure(text=self.t("lang_switch"))
+        self.refresh_label.configure(text=self.t("refresh_label"))
+        self.apply_btn.configure(text=self.t("apply"))
+        self.pin_btn.configure(text=self.t("pin"))
+        self.sync_btn.configure(text=self.t("sync_now"))
+        self.open_btn.configure(text=self.t("open_usage"))
+        if hasattr(self, "compact_sync_btn"):
+            self.compact_sync_btn.configure(text=self.t("sync"))
+        self.apply_mode()
+        if self._msg not in ("BOOT",):
+            self._paint()
+        else:
+            self.meta.configure(text=self.t("boot"))
 
     def _loop(self):
         while not self._stop.is_set():
@@ -415,7 +564,7 @@ class Hud(tk.Tk):
         if self._refreshing:
             return
         self._refreshing = True
-        self.meta.configure(text="syncing telemetry...")
+        self.meta.configure(text=self.t("syncing"))
 
         def work():
             msg, data = fetch_usage()
@@ -432,12 +581,33 @@ class Hud(tk.Tk):
         self.extra.insert("1.0", content)
         self.extra.configure(state="disabled")
 
+    def _fmt_err(self, msg: str) -> str:
+        mapping = {
+            "MISSING ~/.codex/auth.json — login Codex first": "err_missing_auth",
+            "API-key login has no ChatGPT 5h/7d windows": "err_apikey",
+            "auth.json missing access_token / account_id": "err_missing_tokens",
+            "session expired — re-login Codex": "err_expired",
+        }
+        if msg in mapping:
+            return self.t(mapping[msg])
+        if msg.startswith("refresh failed:"):
+            return self.t("err_refresh", err=msg.split(":", 1)[-1].strip())
+        if msg.startswith("HTTP "):
+            rest = msg[5:]
+            code, _, detail = rest.partition(":")
+            return self.t("err_http", code=code.strip(), detail=detail.strip())
+        if msg.startswith("request failed:"):
+            return self.t("err_request", err=msg.split(":", 1)[-1].strip())
+        return msg
+
     def _paint_card(self, card, win: dict):
         used = float(win.get("used_percent") or 0)
         reset_after = win.get("reset_after_seconds")
         color = RED if used >= 90 else AMBER if used >= 70 else CYAN
-        card["pct"].configure(text=f"{used:05.1f}%".replace("0", "0") if False else f"{used:5.1f}%", fg=color)
-        card["detail"].configure(text=f"USED {used:.1f}%   RESET IN {_fmt_duration(reset_after)}")
+        card["pct"].configure(text=f"{used:5.1f}%", fg=color)
+        card["detail"].configure(
+            text=self.t("used_line", used=used, reset=_fmt_duration(reset_after, self.lang()))
+        )
         card["meter"].set_value(used)
 
     def _paint(self):
@@ -447,27 +617,35 @@ class Hud(tk.Tk):
             msg = self._msg
             data = self._data
         if msg != "ok" or not data:
-            self.meta.configure(text=f"FAULT // {msg}")
-            self._set_extra(msg)
+            shown = self._fmt_err(msg)
+            self.meta.configure(text=self.t("fault", msg=shown))
+            self._set_extra(shown)
             return
         s = summarize(data)
-        status = "OK" if s.get("allowed") and not s.get("limit_reached") else "LIMIT"
+        status = self.t("state_ok") if s.get("allowed") and not s.get("limit_reached") else self.t("state_limit")
         self.meta.configure(
-            text=f"{s.get('email')}   PLAN={str(s.get('plan') or '-').upper()}   STATE={status}   @{s.get('checked_at')}"
+            text=self.t(
+                "meta_ok",
+                email=s.get("email"),
+                plan=str(s.get("plan") or "-").upper(),
+                status=status,
+                checked_at=s.get("checked_at"),
+            )
         )
         self._paint_card(self.card5, s.get("primary") or {})
         self._paint_card(self.card7, s.get("secondary") or {})
         credits = s.get("credits") or {}
-        lines = [
-            f"credits.balance        {credits.get('balance')}",
-            f"credits.has            {credits.get('has_credits')}   unlimited={credits.get('unlimited')}",
-            f"banked.resets          {s.get('banked_resets')}   applicable={s.get('banked_applicable')}",
-            f"reached.type           {s.get('reached_type')}",
-            f"source                 chatgpt.com/backend-api/wham/usage",
-            f"note                   5h AND 7d must both have remaining quota",
-        ]
-        self._set_extra("\n".join(lines))
-
+        self._set_extra(
+            self.t(
+                "extra",
+                balance=credits.get("balance"),
+                has_credits=credits.get("has_credits"),
+                unlimited=credits.get("unlimited"),
+                banked_resets=s.get("banked_resets"),
+                banked_applicable=s.get("banked_applicable"),
+                reached_type=s.get("reached_type"),
+            )
+        )
 
     def is_compact(self) -> bool:
         return str(self._cfg.get("mode") or "detail") == "compact"
@@ -486,21 +664,25 @@ class Hud(tk.Tk):
             self.btns.pack_forget()
             if not hasattr(self, "compact_bar"):
                 self.compact_bar = tk.Frame(self, bg=BG)
-                self._btn(self.compact_bar, "SYNC", self.refresh_now).pack(side="left")
-                self.compact_mode_btn = self._btn(self.compact_bar, "DETAIL", self.toggle_mode)
+                self.compact_sync_btn = self._btn(self.compact_bar, self.t("sync"), self.refresh_now)
+                self.compact_sync_btn.pack(side="left")
+                self.compact_mode_btn = self._btn(self.compact_bar, self.t("detail"), self.toggle_mode)
                 self.compact_mode_btn.pack(side="right")
-            self.card5["title"].configure(text="5H")
-            self.card7["title"].configure(text="7D")
+            else:
+                self.compact_sync_btn.configure(text=self.t("sync"))
+                self.compact_mode_btn.configure(text=self.t("detail"))
+            self.card5["title"].configure(text=self.t("card5_compact"))
+            self.card7["title"].configure(text=self.t("card7_compact"))
             self.card5["wrap"].pack(fill="x", padx=14, pady=(2, 4))
             self.card7["wrap"].pack(fill="x", padx=14, pady=(2, 4))
             self.compact_bar.pack(fill="x", padx=14, pady=(4, 10))
             self.minsize(300, 200)
-            self.maxsize(520, 360)
+            self.maxsize(560, 360)
         else:
             if hasattr(self, "compact_bar"):
                 self.compact_bar.pack_forget()
-            self.card5["title"].configure(text="PRIMARY  //  5H WINDOW")
-            self.card7["title"].configure(text="SECONDARY  //  7D WINDOW")
+            self.card5["title"].configure(text=self.t("card5"))
+            self.card7["title"].configure(text=self.t("card7"))
             self.maxsize(1400, 1200)
             self.minsize(420, 400)
             self.meta.pack(fill="x", padx=14)
@@ -509,7 +691,7 @@ class Hud(tk.Tk):
             self.extra_wrap.pack(fill="both", expand=True, padx=14, pady=8)
             self.ctrl.pack(fill="x", padx=14, pady=(0, 6))
             self.btns.pack(fill="x", padx=14, pady=(0, 12))
-            self.mode_btn.configure(text="COMPACT")
+            self.mode_btn.configure(text=self.t("compact"))
         pad = (4, 6) if compact else (6, 10)
         for card in (self.card5, self.card7):
             card["meter"].pack_configure(pady=pad)

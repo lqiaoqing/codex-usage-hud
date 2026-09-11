@@ -31,7 +31,9 @@ pythonw codex_usage_hud.py
 | 详细 `detail` | 账号 / 套餐、5H / 7D 进度条、credits、刷新间隔、置顶、同步、打开用量页 |
 | 简洁 `compact` | 只留 5H / 7D 额度和同步按钮 |
 
-详细面板右下角 `COMPACT` 切到简洁；简洁面板 `DETAIL` 切回来。切换会按内容改窗口大小，选择会写进配置。
+详细面板用 COMPACT / 简洁 切布局，简洁面板用 DETAIL / 详细切回来。切换会按内容改窗口大小。
+
+标题栏右侧可切换 EN / 中文，默认英文。中文界面用微软雅黑。语言会写进配置。
 
 额度颜色：正常青色，≥70% 琥珀色，≥90% 红色。
 
@@ -43,13 +45,15 @@ pythonw codex_usage_hud.py
 {
   "refresh_sec": 60,
   "topmost": true,
-  "mode": "detail"
+  "mode": "detail",
+  "lang": "en"
 }
 ```
 
 - `refresh_sec`：自动同步间隔，5–3600 秒，默认 60
 - `topmost`：是否置顶（面板上的 PIN）
 - `mode`：`detail` 或 `compact`
+- `lang`：`en`（默认）或 `zh`
 
 登录文件 `~/.codex/auth.json` 不要放进仓库。
 
