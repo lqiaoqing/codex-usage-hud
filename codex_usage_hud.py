@@ -796,8 +796,8 @@ class Hud(tk.Tk):
         self.mini_bar = tk.Frame(self, bg=CHROMA, highlightthickness=0, bd=0)
         self.mini_canvas = tk.Canvas(
             self.mini_bar,
-            width=300,
-            height=44,
+            width=320,
+            height=56,
             bg=CHROMA,
             highlightthickness=0,
             bd=0,
@@ -842,20 +842,43 @@ class Hud(tk.Tk):
             return AMBER
         return CYAN
 
+    def _draw_round_rect(self, c, x1, y1, x2, y2, r, fill, outline, width=1):
+        r = max(1, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+        # Body only (no outer glow — chroma key would turn glow into square crumbs)
+        c.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90, fill=fill, outline=outline, width=width, style="pieslice")
+        c.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90, fill=fill, outline=outline, width=width, style="pieslice")
+        c.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90, fill=fill, outline=outline, width=width, style="pieslice")
+        c.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90, fill=fill, outline=outline, width=width, style="pieslice")
+        c.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline="")
+        c.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline="")
+        # Crisp outline
+        c.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90, style="arc", outline=outline, width=width)
+        c.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90, style="arc", outline=outline, width=width)
+        c.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90, style="arc", outline=outline, width=width)
+        c.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90, style="arc", outline=outline, width=width)
+        c.create_line(x1 + r, y1, x2 - r, y1, fill=outline, width=width)
+        c.create_line(x1 + r, y2, x2 - r, y2, fill=outline, width=width)
+        c.create_line(x1, y1 + r, x1, y2 - r, fill=outline, width=width)
+        c.create_line(x2, y1 + r, x2, y2 - r, fill=outline, width=width)
+        # Inner highlight for a fuller, glossy pill
+        hi = "#1a2a3c"
+        inset = 3
+        ir = max(8, r - 4)
+        c.create_arc(x1 + inset, y1 + inset, x1 + inset + 2 * ir, y1 + inset + 2 * ir, start=90, extent=90, fill=hi, outline="", style="pieslice")
+        c.create_arc(x2 - inset - 2 * ir, y1 + inset, x2 - inset, y1 + inset + 2 * ir, start=0, extent=90, fill=hi, outline="", style="pieslice")
+        c.create_rectangle(x1 + inset + ir, y1 + inset, x2 - inset - ir, y1 + inset + ir * 0.7, fill=hi, outline="")
+
     def _redraw_capsule(self):
         if not hasattr(self, "mini_canvas"):
             return
         c = self.mini_canvas
         c.delete("all")
-        w = max(int(c.winfo_width()), 280)
-        h = max(int(c.winfo_height()), 44)
-        r = h / 2
-        # Capsule body (ellipse ends + middle).
-        c.create_oval(1, 1, h - 1, h - 1, fill=PANEL, outline=LINE, width=1)
-        c.create_oval(w - h + 1, 1, w - 1, h - 1, fill=PANEL, outline=LINE, width=1)
-        c.create_rectangle(r, 1, w - r, h - 1, fill=PANEL, outline=PANEL)
-        c.create_line(r, 1, w - r, 1, fill=LINE)
-        c.create_line(r, h - 1, w - r, h - 1, fill=LINE)
+        w = max(int(c.winfo_width()), 300)
+        h = max(int(c.winfo_height()), 52)
+        pad = 2
+        x1, y1, x2, y2 = pad, pad, w - pad, h - pad
+        radius = (y2 - y1) / 2  # fully rounded ends = true capsule
+        self._draw_round_rect(c, x1, y1, x2, y2, radius, fill=PANEL, outline="#2a4a62", width=1)
 
         if self._mini_fault:
             c.create_text(w / 2, h / 2, text="ERR", fill=RED, font=self._font_mono)
@@ -866,28 +889,28 @@ class Hud(tk.Tk):
         lab5 = self.t("card5_compact")
         lab7 = self.t("card7_compact")
         y = h / 2
-        # Layout: [lab5 pct5] gap [lab7 pct7], centered as a group.
-        gap = 18
+        gap = 22
+        # Slightly larger type for a fuller look
+        lab_font = self._font_tiny
+        pct_font = self._font_mono
         parts = [
-            (lab5, MUTED, self._font_tiny),
-            (f" {p:4.1f}%", self._pct_color(p), self._font_mono),
-            (" " * 2, MUTED, self._font_tiny),
-            (lab7, MUTED, self._font_tiny),
-            (f" {s:4.1f}%", self._pct_color(s), self._font_mono),
+            (lab5, MUTED, lab_font),
+            (f" {p:4.1f}%", self._pct_color(p), pct_font),
+            (lab7, MUTED, lab_font),
+            (f" {s:4.1f}%", self._pct_color(s), pct_font),
         ]
-        widths = []
-        for text, _col, font in parts:
-            widths.append(font.measure(text))
-        total = sum(widths) + gap
+        widths = [font.measure(text) for text, _col, font in parts]
+        total = widths[0] + widths[1] + gap + widths[2] + widths[3]
         x = (w - total) / 2
-        # first cluster
         c.create_text(x, y, text=parts[0][0], fill=parts[0][1], font=parts[0][2], anchor="w")
         x += widths[0]
         c.create_text(x, y, text=parts[1][0], fill=parts[1][1], font=parts[1][2], anchor="w")
         x += widths[1] + gap
+        # soft divider between clusters
+        c.create_oval(x - gap / 2 - 1.5, y - 1.5, x - gap / 2 + 1.5, y + 1.5, fill=CYAN_DIM, outline="")
+        c.create_text(x, y, text=parts[2][0], fill=parts[2][1], font=parts[2][2], anchor="w")
+        x += widths[2]
         c.create_text(x, y, text=parts[3][0], fill=parts[3][1], font=parts[3][2], anchor="w")
-        x += widths[3]
-        c.create_text(x, y, text=parts[4][0], fill=parts[4][1], font=parts[4][2], anchor="w")
 
     def _paint_mini(self, primary: dict | None = None, secondary: dict | None = None, fault: str | None = None):
         self._mini_primary = primary or {}
@@ -913,8 +936,8 @@ class Hud(tk.Tk):
             self._ensure_mini_bar()
             self.mini_bar.pack(fill="both", expand=True)
             self._set_mini_chrome(True)
-            self.minsize(240, 40)
-            self.maxsize(360, 56)
+            self.minsize(280, 48)
+            self.maxsize(400, 72)
             with self._lock:
                 data = self._data
                 msg = self._msg
@@ -995,7 +1018,7 @@ class Hud(tk.Tk):
         h = int(self.winfo_reqheight())
         mode = self.mode()
         if mode == "mini":
-            w, h = (320, 44) if self.lang() == "zh" else (300, 44)
+            w, h = (340, 56) if self.lang() == "zh" else (320, 56)
         elif mode == "compact":
             w = max(w, 340)
             h = max(h, 220)
