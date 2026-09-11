@@ -56,6 +56,8 @@ STRINGS = {
         "open_usage": "OPEN USAGE",
         "compact": "COMPACT",
         "detail": "DETAIL",
+        "mini": "MINI",
+        "expand": "EXPAND",
         "sync": "SYNC",
         "lang_switch": "中文",
         "used_line": "USED {used:.1f}%   RESET IN {reset}",
@@ -98,6 +100,8 @@ STRINGS = {
         "open_usage": "打开用量页",
         "compact": "简洁",
         "detail": "详细",
+        "mini": "迷你",
+        "expand": "展开",
         "sync": "同步",
         "lang_switch": "EN",
         "used_line": "已用 {used:.1f}%   {reset} 后重置",
@@ -157,7 +161,11 @@ def load_ui_config() -> dict:
     data["refresh_sec"] = max(MIN_REFRESH_SEC, min(MAX_REFRESH_SEC, sec))
     data.setdefault("topmost", True)
     mode = str(data.get("mode") or "detail").lower()
-    data["mode"] = "compact" if mode == "compact" else "detail"
+    if mode not in ("detail", "compact", "mini"):
+        mode = "detail"
+    data["mode"] = mode
+    expand = str(data.get("expand_mode") or "compact").lower()
+    data["expand_mode"] = "detail" if expand == "detail" else "compact"
     lang = str(data.get("lang") or "en").lower()
     data["lang"] = "zh" if lang in ("zh", "zh-cn", "zh_cn", "cn", "chinese") else "en"
     return data
@@ -502,6 +510,8 @@ class Hud(tk.Tk):
         self.open_btn.pack(side="left", padx=8)
         self.mode_btn = self._btn(btns, self.t("compact"), self.toggle_mode)
         self.mode_btn.pack(side="right")
+        self.mini_btn = self._btn(btns, self.t("mini"), self.enter_mini)
+        self.mini_btn.pack(side="right", padx=(0, 8))
 
         self.apply_mode()
 
@@ -587,6 +597,16 @@ class Hud(tk.Tk):
         if hasattr(self, "compact_sync_btn"):
             self.compact_sync_btn.configure(text=self.t("sync"), font=self._font_tiny)
             self.compact_mode_btn.configure(font=self._font_tiny)
+        if hasattr(self, "mini_btn"):
+            self.mini_btn.configure(text=self.t("mini"), font=self._font_tiny)
+        if hasattr(self, "compact_mini_btn"):
+            self.compact_mini_btn.configure(text=self.t("mini"), font=self._font_tiny)
+        if hasattr(self, "mini_expand_btn"):
+            self.mini_expand_btn.configure(text=self.t("expand"), font=self._font_tiny)
+            self.mini_5_lab.configure(font=self._font_tiny)
+            self.mini_7_lab.configure(font=self._font_tiny)
+            self.mini_5_pct.configure(font=self._font_mono)
+            self.mini_7_pct.configure(font=self._font_mono)
         self.apply_mode()
         if self._msg not in ("BOOT",):
             self._paint()
@@ -684,6 +704,8 @@ class Hud(tk.Tk):
             shown = self._fmt_err(msg)
             self.meta.configure(text=self.t("fault", msg=shown), font=self._label_font())
             self._set_extra(rows=[("", shown)])
+            if self.is_mini():
+                self._paint_mini(fault=shown)
             return
         s = summarize(data)
         status = self.t("state_ok") if s.get("allowed") and not s.get("limit_reached") else self.t("state_limit")
@@ -699,6 +721,8 @@ class Hud(tk.Tk):
         )
         self._paint_card(self.card5, s.get("primary") or {})
         self._paint_card(self.card7, s.get("secondary") or {})
+        if self.is_mini():
+            self._paint_mini(s.get("primary") or {}, s.get("secondary") or {})
         credits = s.get("credits") or {}
         fmt = {
             "balance": credits.get("balance"),
@@ -717,16 +741,123 @@ class Hud(tk.Tk):
             rows.append((label, value))
         self._set_extra(rows=rows)
 
+    def mode(self) -> str:
+        m = str(self._cfg.get("mode") or "detail")
+        return m if m in ("detail", "compact", "mini") else "detail"
+
     def is_compact(self) -> bool:
-        return str(self._cfg.get("mode") or "detail") == "compact"
+        return self.mode() == "compact"
+
+    def is_mini(self) -> bool:
+        return self.mode() == "mini"
 
     def toggle_mode(self):
+        # detail <-> compact only
+        if self.is_mini():
+            self.expand_from_mini()
+            return
         self._cfg["mode"] = "detail" if self.is_compact() else "compact"
+        if self._cfg["mode"] != "mini":
+            self._cfg["expand_mode"] = self._cfg["mode"]
         save_ui_config(self._cfg)
         self.apply_mode()
 
+    def enter_mini(self):
+        if self.mode() != "mini":
+            self._cfg["expand_mode"] = "detail" if self.mode() == "detail" else "compact"
+        self._cfg["mode"] = "mini"
+        save_ui_config(self._cfg)
+        self.apply_mode()
+
+    def expand_from_mini(self):
+        target = str(self._cfg.get("expand_mode") or "compact")
+        self._cfg["mode"] = "detail" if target == "detail" else "compact"
+        save_ui_config(self._cfg)
+        self.apply_mode()
+
+    def _ensure_mini_bar(self):
+        if hasattr(self, "mini_bar"):
+            return
+        self.mini_bar = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        inner = tk.Frame(self.mini_bar, bg=PANEL)
+        inner.pack(fill="both", expand=True, padx=10, pady=8)
+        self.mini_5_lab = tk.Label(inner, text="5H", fg=MUTED, bg=PANEL, font=self._font_tiny)
+        self.mini_5_lab.pack(side="left")
+        self.mini_5_pct = tk.Label(inner, text="--.-%", fg=CYAN, bg=PANEL, font=self._font_mono)
+        self.mini_5_pct.pack(side="left", padx=(4, 12))
+        self.mini_7_lab = tk.Label(inner, text="7D", fg=MUTED, bg=PANEL, font=self._font_tiny)
+        self.mini_7_lab.pack(side="left")
+        self.mini_7_pct = tk.Label(inner, text="--.-%", fg=CYAN, bg=PANEL, font=self._font_mono)
+        self.mini_7_pct.pack(side="left", padx=(4, 12))
+        self.mini_expand_btn = self._btn(inner, self.t("expand"), self.expand_from_mini)
+        self.mini_expand_btn.pack(side="right")
+        # Click anywhere on the capsule to expand.
+        for w in (self.mini_bar, inner, self.mini_5_lab, self.mini_5_pct, self.mini_7_lab, self.mini_7_pct):
+            w.bind("<Button-1>", lambda e: self.expand_from_mini())
+            w.configure(cursor="hand2")
+
+    def _paint_mini(self, primary: dict | None = None, secondary: dict | None = None, fault: str | None = None):
+        if not hasattr(self, "mini_5_pct"):
+            return
+        if fault:
+            self.mini_5_pct.configure(text="ERR", fg=RED)
+            self.mini_7_pct.configure(text="--", fg=MUTED)
+            return
+        p = float((primary or {}).get("used_percent") or 0)
+        s = float((secondary or {}).get("used_percent") or 0)
+        pc = RED if p >= 90 else AMBER if p >= 70 else CYAN
+        sc = RED if s >= 90 else AMBER if s >= 70 else CYAN
+        self.mini_5_lab.configure(text=self.t("card5_compact"))
+        self.mini_7_lab.configure(text=self.t("card7_compact"))
+        self.mini_5_pct.configure(text=f"{p:4.1f}%", fg=pc)
+        self.mini_7_pct.configure(text=f"{s:4.1f}%", fg=sc)
+        if hasattr(self, "mini_expand_btn"):
+            self.mini_expand_btn.configure(text=self.t("expand"))
+
     def apply_mode(self):
-        compact = self.is_compact()
+        mode = self.mode()
+        # Always hide mini first unless entering it.
+        if hasattr(self, "mini_bar") and mode != "mini":
+            self.mini_bar.pack_forget()
+        if mode == "mini":
+            for w in (self.brand.master, self.meta, self.extra_wrap, self.ctrl, self.btns):
+                try:
+                    w.pack_forget()
+                except Exception:
+                    pass
+            # brand.master is header frame
+            self.card5["wrap"].pack_forget()
+            self.card7["wrap"].pack_forget()
+            if hasattr(self, "compact_bar"):
+                self.compact_bar.pack_forget()
+            # Hide full header (lang/status) in mini — keep window light.
+            for child in self.winfo_children():
+                # only forget known chrome; mini_bar created later
+                pass
+            self.brand.master.pack_forget()
+            self._ensure_mini_bar()
+            self.mini_bar.pack(fill="both", expand=True, padx=6, pady=6)
+            self.minsize(260, 52)
+            self.maxsize(420, 80)
+            # refresh mini numbers from last paint cache
+            with self._lock:
+                data = self._data
+                msg = self._msg
+            if msg == "ok" and data:
+                s = summarize(data)
+                self._paint_mini(s.get("primary") or {}, s.get("secondary") or {})
+            elif msg not in ("BOOT",):
+                self._paint_mini(fault=msg)
+            else:
+                self._paint_mini()
+            self._fit_window()
+            return
+
+        # restore header when leaving mini
+        if not self.brand.master.winfo_ismapped():
+            self.brand.master.pack(fill="x", padx=14, pady=(12, 6))
+
+        compact = mode == "compact"
         if compact:
             self.meta.pack_forget()
             self.extra_wrap.pack_forget()
@@ -736,11 +867,18 @@ class Hud(tk.Tk):
                 self.compact_bar = tk.Frame(self, bg=BG)
                 self.compact_sync_btn = self._btn(self.compact_bar, self.t("sync"), self.refresh_now)
                 self.compact_sync_btn.pack(side="left")
+                self.compact_mini_btn = self._btn(self.compact_bar, self.t("mini"), self.enter_mini)
+                self.compact_mini_btn.pack(side="right")
                 self.compact_mode_btn = self._btn(self.compact_bar, self.t("detail"), self.toggle_mode)
-                self.compact_mode_btn.pack(side="right")
+                self.compact_mode_btn.pack(side="right", padx=(0, 8))
             else:
                 self.compact_sync_btn.configure(text=self.t("sync"))
                 self.compact_mode_btn.configure(text=self.t("detail"))
+                if hasattr(self, "compact_mini_btn"):
+                    self.compact_mini_btn.configure(text=self.t("mini"))
+                else:
+                    self.compact_mini_btn = self._btn(self.compact_bar, self.t("mini"), self.enter_mini)
+                    self.compact_mini_btn.pack(side="right")
             self.card5["title"].configure(text=self.t("card5_compact"))
             self.card7["title"].configure(text=self.t("card7_compact"))
             self.card5["wrap"].pack(fill="x", padx=14, pady=(2, 4))
@@ -762,22 +900,38 @@ class Hud(tk.Tk):
             self.ctrl.pack(fill="x", padx=14, pady=(0, 6))
             self.btns.pack(fill="x", padx=14, pady=(0, 12))
             self.mode_btn.configure(text=self.t("compact"))
+            if hasattr(self, "mini_btn"):
+                self.mini_btn.configure(text=self.t("mini"))
         pad = (4, 6) if compact else (6, 10)
         for card in (self.card5, self.card7):
             card["meter"].pack_configure(pady=pad)
+            # show meter/detail again if leaving mini
+            card["detail"].pack(fill="x", padx=10)
+            card["meter"].pack(fill="x", padx=10, pady=pad)
         self._fit_window()
 
     def _fit_window(self):
         self.update_idletasks()
         w = int(self.winfo_reqwidth())
         h = int(self.winfo_reqheight())
-        if self.is_compact():
+        mode = self.mode()
+        if mode == "mini":
+            w = max(w, 280)
+            h = max(h, 56)
+        elif mode == "compact":
             w = max(w, 340)
             h = max(h, 220)
         else:
             w = max(w, 460)
             h = max(h, 470)
-        self.geometry(f"{w}x{h}")
+        # keep current top-left when resizing
+        try:
+            geo = self.geometry()
+            parts = geo.split("+")
+            pos = f"+{parts[1]}+{parts[2]}" if len(parts) >= 3 else ""
+        except Exception:
+            pos = ""
+        self.geometry(f"{w}x{h}{pos}")
 
     def on_close(self):
         self._stop.set()
