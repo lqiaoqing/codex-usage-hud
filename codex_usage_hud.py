@@ -14,6 +14,13 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import font as tkfont
 
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageTk
+
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
+
 CODEX_HOME = Path.home() / ".codex"
 AUTH_PATH = CODEX_HOME / "auth.json"
 CONFIG_PATH = Path.home() / ".codex_usage_hud.json"
@@ -794,25 +801,21 @@ class Hud(tk.Tk):
         if hasattr(self, "mini_bar"):
             return
         self.mini_bar = tk.Frame(self, bg=CHROMA, highlightthickness=0, bd=0)
-        self.mini_canvas = tk.Canvas(
-            self.mini_bar,
-            width=320,
-            height=56,
-            bg=CHROMA,
-            highlightthickness=0,
-            bd=0,
-            cursor="hand2",
-        )
-        self.mini_canvas.pack(fill="both", expand=True)
+        self.mini_label = tk.Label(self.mini_bar, bg=CHROMA, bd=0, highlightthickness=0, cursor="hand2")
+        self.mini_label.pack(fill="both", expand=True)
+        self._mini_photo = None
         self._mini_primary = {}
         self._mini_secondary = {}
         self._mini_fault = None
         self._drag = None
-        c = self.mini_canvas
-        c.bind("<ButtonPress-1>", self._mini_press)
-        c.bind("<B1-Motion>", self._mini_motion)
-        c.bind("<ButtonRelease-1>", self._mini_release)
-        c.bind("<Configure>", lambda e: self._redraw_capsule())
+        for seq, fn in (
+            ("<ButtonPress-1>", self._mini_press),
+            ("<B1-Motion>", self._mini_motion),
+            ("<ButtonRelease-1>", self._mini_release),
+        ):
+            self.mini_label.bind(seq, fn)
+            self.mini_bar.bind(seq, fn)
+        self.mini_label.bind("<Configure>", lambda e: self._redraw_capsule())
 
     def _mini_press(self, e):
         self._drag = (e.x_root, e.y_root, self.winfo_x(), self.winfo_y(), False)
@@ -842,75 +845,141 @@ class Hud(tk.Tk):
             return AMBER
         return CYAN
 
-    def _draw_round_rect(self, c, x1, y1, x2, y2, r, fill, outline, width=1):
-        r = max(1, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
-        # Body only (no outer glow — chroma key would turn glow into square crumbs)
-        c.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90, fill=fill, outline=outline, width=width, style="pieslice")
-        c.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90, fill=fill, outline=outline, width=width, style="pieslice")
-        c.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90, fill=fill, outline=outline, width=width, style="pieslice")
-        c.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90, fill=fill, outline=outline, width=width, style="pieslice")
-        c.create_rectangle(x1 + r, y1, x2 - r, y2, fill=fill, outline="")
-        c.create_rectangle(x1, y1 + r, x2, y2 - r, fill=fill, outline="")
-        # Crisp outline
-        c.create_arc(x1, y1, x1 + 2 * r, y1 + 2 * r, start=90, extent=90, style="arc", outline=outline, width=width)
-        c.create_arc(x2 - 2 * r, y1, x2, y1 + 2 * r, start=0, extent=90, style="arc", outline=outline, width=width)
-        c.create_arc(x1, y2 - 2 * r, x1 + 2 * r, y2, start=180, extent=90, style="arc", outline=outline, width=width)
-        c.create_arc(x2 - 2 * r, y2 - 2 * r, x2, y2, start=270, extent=90, style="arc", outline=outline, width=width)
-        c.create_line(x1 + r, y1, x2 - r, y1, fill=outline, width=width)
-        c.create_line(x1 + r, y2, x2 - r, y2, fill=outline, width=width)
-        c.create_line(x1, y1 + r, x1, y2 - r, fill=outline, width=width)
-        c.create_line(x2, y1 + r, x2, y2 - r, fill=outline, width=width)
-        # Inner highlight for a fuller, glossy pill
-        hi = "#1a2a3c"
-        inset = 3
-        ir = max(8, r - 4)
-        c.create_arc(x1 + inset, y1 + inset, x1 + inset + 2 * ir, y1 + inset + 2 * ir, start=90, extent=90, fill=hi, outline="", style="pieslice")
-        c.create_arc(x2 - inset - 2 * ir, y1 + inset, x2 - inset, y1 + inset + 2 * ir, start=0, extent=90, fill=hi, outline="", style="pieslice")
-        c.create_rectangle(x1 + inset + ir, y1 + inset, x2 - inset - ir, y1 + inset + ir * 0.7, fill=hi, outline="")
+    def _hex_rgb(self, color: str) -> tuple[int, int, int]:
+        c = color.lstrip("#")
+        return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+    def _mini_font(self, size: int, bold: bool = False):
+        if not HAS_PIL:
+            return None
+        if self.lang() == "zh":
+            paths = [
+                r"C:\Windows\Fonts\msyh.ttc",
+                r"C:\Windows\Fonts\msyhbd.ttc",
+                r"C:\Windows\Fonts\simhei.ttf",
+            ]
+        else:
+            paths = [
+                r"C:\Windows\Fonts\consola.ttf",
+                r"C:\Windows\Fonts\consolab.ttf",
+                r"C:\Windows\Fonts\arial.ttf",
+            ]
+        for path in paths:
+            try:
+                return ImageFont.truetype(path, size=size, index=0)
+            except Exception:
+                continue
+        return ImageFont.load_default()
+
+    def _mini_size(self) -> tuple[int, int]:
+        # Compact capsule; Chinese labels need a bit more width.
+        if self.lang() == "zh":
+            return 248, 34
+        return 228, 34
 
     def _redraw_capsule(self):
-        if not hasattr(self, "mini_canvas"):
+        if not hasattr(self, "mini_label"):
             return
-        c = self.mini_canvas
-        c.delete("all")
-        w = max(int(c.winfo_width()), 300)
-        h = max(int(c.winfo_height()), 52)
-        pad = 2
-        x1, y1, x2, y2 = pad, pad, w - pad, h - pad
-        radius = (y2 - y1) / 2  # fully rounded ends = true capsule
-        self._draw_round_rect(c, x1, y1, x2, y2, radius, fill=PANEL, outline="#2a4a62", width=1)
+        w, h = self._mini_size()
+        if HAS_PIL:
+            self._redraw_capsule_pil(w, h)
+        else:
+            self._redraw_capsule_canvas_fallback(w, h)
+
+    def _redraw_capsule_pil(self, w: int, h: int):
+        scale = 4  # supersample then hard-key → smoother silhouette than Tk arcs
+        W, H = w * scale, h * scale
+        chroma = self._hex_rgb(CHROMA)
+        panel = self._hex_rgb(PANEL)
+        outline = self._hex_rgb("#2a4a62")
+        hi = self._hex_rgb("#152536")
+
+        base = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(base)
+        pad = 2 * scale
+        box = [pad, pad, W - pad - 1, H - pad - 1]
+        radius = (box[3] - box[1]) / 2
+        draw.rounded_rectangle(box, radius=radius, fill=panel + (255,), outline=outline + (255,), width=scale)
+        # soft inner sheen
+        ib = [pad + 2 * scale, pad + 2 * scale, W - pad - 1 - 2 * scale, pad + int(9 * scale)]
+        if ib[2] > ib[0] and ib[3] > ib[1]:
+            draw.rounded_rectangle(ib, radius=radius * 0.55, fill=hi + (220,))
+
+        img = base.resize((w, h), Image.Resampling.LANCZOS)
+        # Hard chroma key after downsample (keeps edge smooth vs native Tk)
+        rgba = img.split()
+        rgb = Image.merge("RGB", rgba[:3])
+        alpha = rgba[3]
+        out = Image.new("RGB", (w, h), chroma)
+        out.paste(rgb, mask=alpha.point(lambda a: 255 if a >= 96 else 0))
+
+        d = ImageDraw.Draw(out)
+        lab_font = self._mini_font(10)
+        pct_font = self._mini_font(11)
 
         if self._mini_fault:
-            c.create_text(w / 2, h / 2, text="ERR", fill=RED, font=self._font_mono)
-            return
+            d.text((w / 2, h / 2), "ERR", fill=self._hex_rgb(RED), font=pct_font, anchor="mm")
+        else:
+            p = float((self._mini_primary or {}).get("used_percent") or 0)
+            s = float((self._mini_secondary or {}).get("used_percent") or 0)
+            lab5 = self.t("card5_compact")
+            lab7 = self.t("card7_compact")
+            t5 = f"{lab5} {p:4.1f}%"
+            t7 = f"{lab7} {s:4.1f}%"
+            # measure clusters
+            def tw(text, font):
+                box = d.textbbox((0, 0), text, font=font)
+                return box[2] - box[0]
 
+            # draw label muted + pct colored separately for each cluster
+            gap = 14
+            c5 = f"{p:4.1f}%"
+            c7 = f"{s:4.1f}%"
+            w_lab5 = tw(lab5 + " ", lab_font)
+            w_pct5 = tw(c5, pct_font)
+            w_lab7 = tw(lab7 + " ", lab_font)
+            w_pct7 = tw(c7, pct_font)
+            total = w_lab5 + w_pct5 + gap + w_lab7 + w_pct7
+            x = (w - total) / 2
+            y = h / 2
+            d.text((x, y), lab5 + " ", fill=self._hex_rgb(MUTED), font=lab_font, anchor="lm")
+            x += w_lab5
+            d.text((x, y), c5, fill=self._hex_rgb(self._pct_color(p)), font=pct_font, anchor="lm")
+            x += w_pct5 + gap
+            # tiny separator
+            d.ellipse((x - gap / 2 - 1.2, y - 1.2, x - gap / 2 + 1.2, y + 1.2), fill=self._hex_rgb(CYAN_DIM))
+            d.text((x, y), lab7 + " ", fill=self._hex_rgb(MUTED), font=lab_font, anchor="lm")
+            x += w_lab7
+            d.text((x, y), c7, fill=self._hex_rgb(self._pct_color(s)), font=pct_font, anchor="lm")
+
+        self._mini_photo = ImageTk.PhotoImage(out)
+        self.mini_label.configure(image=self._mini_photo)
+
+    def _redraw_capsule_canvas_fallback(self, w: int, h: int):
+        # Rare path if Pillow missing: keep a tiny canvas.
+        if not hasattr(self, "mini_canvas"):
+            self.mini_canvas = tk.Canvas(self.mini_bar, width=w, height=h, bg=CHROMA, highlightthickness=0, bd=0, cursor="hand2")
+            self.mini_canvas.pack(fill="both", expand=True)
+            self.mini_label.pack_forget()
+            self.mini_canvas.bind("<ButtonPress-1>", self._mini_press)
+            self.mini_canvas.bind("<B1-Motion>", self._mini_motion)
+            self.mini_canvas.bind("<ButtonRelease-1>", self._mini_release)
+        c = self.mini_canvas
+        c.delete("all")
+        c.configure(width=w, height=h)
+        r = h / 2 - 1
+        c.create_oval(1, 1, h - 1, h - 1, fill=PANEL, outline="#2a4a62")
+        c.create_oval(w - h + 1, 1, w - 1, h - 1, fill=PANEL, outline="#2a4a62")
+        c.create_rectangle(r, 1, w - r, h - 1, fill=PANEL, outline=PANEL)
+        c.create_line(r, 1, w - r, 1, fill="#2a4a62")
+        c.create_line(r, h - 1, w - r, h - 1, fill="#2a4a62")
+        if self._mini_fault:
+            c.create_text(w / 2, h / 2, text="ERR", fill=RED, font=self._font_tiny)
+            return
         p = float((self._mini_primary or {}).get("used_percent") or 0)
         s = float((self._mini_secondary or {}).get("used_percent") or 0)
-        lab5 = self.t("card5_compact")
-        lab7 = self.t("card7_compact")
-        y = h / 2
-        gap = 22
-        # Slightly larger type for a fuller look
-        lab_font = self._font_tiny
-        pct_font = self._font_mono
-        parts = [
-            (lab5, MUTED, lab_font),
-            (f" {p:4.1f}%", self._pct_color(p), pct_font),
-            (lab7, MUTED, lab_font),
-            (f" {s:4.1f}%", self._pct_color(s), pct_font),
-        ]
-        widths = [font.measure(text) for text, _col, font in parts]
-        total = widths[0] + widths[1] + gap + widths[2] + widths[3]
-        x = (w - total) / 2
-        c.create_text(x, y, text=parts[0][0], fill=parts[0][1], font=parts[0][2], anchor="w")
-        x += widths[0]
-        c.create_text(x, y, text=parts[1][0], fill=parts[1][1], font=parts[1][2], anchor="w")
-        x += widths[1] + gap
-        # soft divider between clusters
-        c.create_oval(x - gap / 2 - 1.5, y - 1.5, x - gap / 2 + 1.5, y + 1.5, fill=CYAN_DIM, outline="")
-        c.create_text(x, y, text=parts[2][0], fill=parts[2][1], font=parts[2][2], anchor="w")
-        x += widths[2]
-        c.create_text(x, y, text=parts[3][0], fill=parts[3][1], font=parts[3][2], anchor="w")
+        text = f"{self.t('card5_compact')} {p:4.1f}%   {self.t('card7_compact')} {s:4.1f}%"
+        c.create_text(w / 2, h / 2, text=text, fill=TEXT, font=self._font_tiny)
 
     def _paint_mini(self, primary: dict | None = None, secondary: dict | None = None, fault: str | None = None):
         self._mini_primary = primary or {}
@@ -936,8 +1005,8 @@ class Hud(tk.Tk):
             self._ensure_mini_bar()
             self.mini_bar.pack(fill="both", expand=True)
             self._set_mini_chrome(True)
-            self.minsize(280, 48)
-            self.maxsize(400, 72)
+            self.minsize(200, 28)
+            self.maxsize(280, 40)
             with self._lock:
                 data = self._data
                 msg = self._msg
@@ -1018,7 +1087,7 @@ class Hud(tk.Tk):
         h = int(self.winfo_reqheight())
         mode = self.mode()
         if mode == "mini":
-            w, h = (340, 56) if self.lang() == "zh" else (320, 56)
+            w, h = self._mini_size()
         elif mode == "compact":
             w = max(w, 340)
             h = max(h, 220)
