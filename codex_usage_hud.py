@@ -838,7 +838,7 @@ class Hud(tk.Tk):
         except Exception:
             pass
 
-    def _apply_layered_image(self, im: "Image.Image") -> bool:
+    def _apply_layered_image(self, im: "Image.Image", x: int | None = None, y: int | None = None) -> bool:
         """Push a premultiplied-alpha RGBA image to the window (smooth edges)."""
         if not getattr(self, "_mini_layered", False):
             return False
@@ -907,7 +907,9 @@ class Hud(tk.Tk):
             old = ctypes.windll.gdi32.SelectObject(mem_dc, dib)
             blend = BLENDFUNCTION(0, 0, 255, 1)  # AC_SRC_OVER, AC_SRC_ALPHA
             src_pt = POINT(0, 0)
-            dst_pt = POINT(int(self.winfo_x()), int(self.winfo_y()))
+            dx = int(self.winfo_x() if x is None else x)
+            dy = int(self.winfo_y() if y is None else y)
+            dst_pt = POINT(dx, dy)
             size = SIZE(w, h)
             ULW_ALPHA = 0x00000002
             ok = ctypes.windll.user32.UpdateLayeredWindow(
@@ -955,34 +957,99 @@ class Hud(tk.Tk):
                 self.unbind(seq)
             except Exception:
                 pass
-        if enabled:
-            self.bind("<ButtonPress-1>", self._mini_press)
-            self.bind("<B1-Motion>", self._mini_motion)
-            self.bind("<ButtonRelease-1>", self._mini_release)
+            try:
+                self.mini_label.unbind(seq)
+            except Exception:
+                pass
+            try:
+                self.mini_bar.unbind(seq)
+            except Exception:
+                pass
+        if not enabled:
+            self._drag = None
+            return
+        for w in (self, self.mini_bar, self.mini_label):
+            w.bind("<ButtonPress-1>", self._mini_press)
+            w.bind("<B1-Motion>", self._mini_motion)
+            w.bind("<ButtonRelease-1>", self._mini_release)
 
     def _mini_press(self, e):
-        self._drag = (e.x_root, e.y_root, self.winfo_x(), self.winfo_y(), False)
+        self._drag = {
+            "x0": e.x_root,
+            "y0": e.y_root,
+            "wx": self.winfo_x(),
+            "wy": self.winfo_y(),
+            "moved": False,
+        }
+        try:
+            self.grab_set_global()
+        except Exception:
+            try:
+                self.grab_set()
+            except Exception:
+                pass
+        self._mini_drag_poll()
+
+    def _mini_drag_poll(self):
+        """Backup drag loop: layered HWNDs sometimes swallow B1-Motion."""
+        if not self._drag or not self.is_mini():
+            return
+        pressed = ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+        pt = POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        if not pressed:
+            moved = bool(self._drag.get("moved"))
+            self._mini_end_drag()
+            if not moved:
+                self.expand_from_mini()
+            return
+        dx = pt.x - self._drag["x0"]
+        dy = pt.y - self._drag["y0"]
+        if abs(dx) + abs(dy) > 4:
+            self._drag["moved"] = True
+        if self._drag["moved"]:
+            nx = self._drag["wx"] + dx
+            ny = self._drag["wy"] + dy
+            self.geometry(f"+{nx}+{ny}")
+            self._present_mini_at(nx, ny)
+        self.after(16, self._mini_drag_poll)
 
     def _mini_motion(self, e):
+        # Primary path when Tk still delivers motion events.
         if not self._drag:
             return
-        x0, y0, wx, wy, moved = self._drag
-        dx = e.x_root - x0
-        dy = e.y_root - y0
-        if abs(dx) + abs(dy) > 5:
-            moved = True
-        self._drag = (x0, y0, wx, wy, moved)
-        if moved:
-            self.geometry(f"+{wx + dx}+{wy + dy}")
-            # Layered windows need an explicit reposition paint.
-            if getattr(self, "_mini_layered", False):
-                self._redraw_capsule()
+        dx = e.x_root - self._drag["x0"]
+        dy = e.y_root - self._drag["y0"]
+        if abs(dx) + abs(dy) > 4:
+            self._drag["moved"] = True
+        if self._drag["moved"]:
+            nx = self._drag["wx"] + dx
+            ny = self._drag["wy"] + dy
+            self.geometry(f"+{nx}+{ny}")
+            self._present_mini_at(nx, ny)
 
     def _mini_release(self, e):
-        dragged = bool(self._drag and self._drag[4])
-        self._drag = None
-        if not dragged:
+        if not self._drag:
+            return
+        moved = bool(self._drag.get("moved"))
+        self._mini_end_drag()
+        if not moved:
             self.expand_from_mini()
+
+    def _mini_end_drag(self):
+        self._drag = None
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+    def _present_mini_at(self, x: int, y: int):
+        """Reposition layered bitmap without rebuilding pixels."""
+        im = getattr(self, "_mini_rgba", None)
+        if im is not None and getattr(self, "_mini_layered", False):
+            self._apply_layered_image(im, x=x, y=y)
 
     def _pct_color(self, used: float) -> str:
         if used >= 90:
@@ -1106,9 +1173,9 @@ class Hud(tk.Tk):
             x += widths[2]
             d.text((x, y), clusters[3][0], fill=self._hex_rgb(clusters[3][1]) + (255,), font=clusters[3][2], anchor="lm")
 
+        self._mini_rgba = img
+        self._bind_mini_root(True)
         if self._apply_layered_image(img):
-            # Layered bitmap is what the user sees; route input on the root window.
-            self._bind_mini_root(True)
             return
 
         # Fallback: chroma-key supersample (more jagged, but works)
@@ -1149,6 +1216,7 @@ class Hud(tk.Tk):
             self._ensure_mini_bar()
             self.mini_bar.pack(fill="both", expand=True)
             self._set_mini_chrome(True)
+            self._bind_mini_root(True)
             self.minsize(160, 30)
             self.maxsize(420, 48)
             with self._lock:
