@@ -1,6 +1,7 @@
 """Codex Usage HUD — geek-styled always-on-top widget for 5h / 7d quotas."""
 from __future__ import annotations
 
+import ctypes
 import json
 import math
 import threading
@@ -15,7 +16,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageTk
+    from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
 
     HAS_PIL = True
 except Exception:
@@ -783,12 +784,17 @@ class Hud(tk.Tk):
         if enabled:
             self.overrideredirect(True)
             self.configure(bg=CHROMA)
+            # Prefer per-pixel alpha; fall back to color-key if layered API fails.
+            self._mini_layered = False
             try:
-                self.wm_attributes("-transparentcolor", CHROMA)
+                self.wm_attributes("-transparentcolor", "")
             except Exception:
                 pass
             self.attributes("-topmost", True)
+            self.after(10, self._enable_layered_style)
         else:
+            self._bind_mini_root(False)
+            self._disable_layered_style()
             try:
                 self.wm_attributes("-transparentcolor", "")
             except Exception:
@@ -796,6 +802,132 @@ class Hud(tk.Tk):
             self.overrideredirect(False)
             self.configure(bg=BG)
             self.attributes("-topmost", bool(self._cfg.get("topmost", True)))
+
+    def _mini_hwnd(self) -> int:
+        hwnd = int(self.winfo_id())
+        parent = ctypes.windll.user32.GetParent(hwnd)
+        return int(parent or hwnd)
+
+    def _enable_layered_style(self):
+        if not self.is_mini():
+            return
+        try:
+            hwnd = self._mini_hwnd()
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x80000
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED)
+            self._mini_layered = True
+            self._redraw_capsule()
+        except Exception:
+            self._mini_layered = False
+            try:
+                self.wm_attributes("-transparentcolor", CHROMA)
+            except Exception:
+                pass
+            self._redraw_capsule()
+
+    def _disable_layered_style(self):
+        self._mini_layered = False
+        try:
+            hwnd = self._mini_hwnd()
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x80000
+            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style & ~WS_EX_LAYERED)
+        except Exception:
+            pass
+
+    def _apply_layered_image(self, im: "Image.Image") -> bool:
+        """Push a premultiplied-alpha RGBA image to the window (smooth edges)."""
+        if not getattr(self, "_mini_layered", False):
+            return False
+        try:
+            im = im.convert("RGBA")
+            w, h = im.size
+            # Premultiply for UpdateLayeredWindow
+            r, g, b, a = im.split()
+            r = ImageChops.multiply(r, a)
+            g = ImageChops.multiply(g, a)
+            b = ImageChops.multiply(b, a)
+            premul = Image.merge("RGBA", (r, g, b, a))
+            # Windows wants BGRA byte order
+            bgra = premul.tobytes("raw", "BGRA")
+
+            class BITMAPINFOHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", ctypes.c_uint32),
+                    ("biWidth", ctypes.c_int32),
+                    ("biHeight", ctypes.c_int32),
+                    ("biPlanes", ctypes.c_uint16),
+                    ("biBitCount", ctypes.c_uint16),
+                    ("biCompression", ctypes.c_uint32),
+                    ("biSizeImage", ctypes.c_uint32),
+                    ("biXPelsPerMeter", ctypes.c_int32),
+                    ("biYPelsPerMeter", ctypes.c_int32),
+                    ("biClrUsed", ctypes.c_uint32),
+                    ("biClrImportant", ctypes.c_uint32),
+                ]
+
+            class BITMAPINFO(ctypes.Structure):
+                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 3)]
+
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            class SIZE(ctypes.Structure):
+                _fields_ = [("cx", ctypes.c_long), ("cy", ctypes.c_long)]
+
+            class BLENDFUNCTION(ctypes.Structure):
+                _fields_ = [
+                    ("BlendOp", ctypes.c_byte),
+                    ("BlendFlags", ctypes.c_byte),
+                    ("SourceConstantAlpha", ctypes.c_byte),
+                    ("AlphaFormat", ctypes.c_byte),
+                ]
+
+            hwnd = self._mini_hwnd()
+            screen_dc = ctypes.windll.user32.GetDC(0)
+            mem_dc = ctypes.windll.gdi32.CreateCompatibleDC(screen_dc)
+            bmi = BITMAPINFO()
+            ctypes.memset(ctypes.byref(bmi), 0, ctypes.sizeof(bmi))
+            bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bmi.bmiHeader.biWidth = w
+            bmi.bmiHeader.biHeight = -h  # top-down
+            bmi.bmiHeader.biPlanes = 1
+            bmi.bmiHeader.biBitCount = 32
+            bmi.bmiHeader.biCompression = 0
+            bits = ctypes.c_void_p()
+            dib = ctypes.windll.gdi32.CreateDIBSection(mem_dc, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
+            if not dib:
+                ctypes.windll.gdi32.DeleteDC(mem_dc)
+                ctypes.windll.user32.ReleaseDC(0, screen_dc)
+                return False
+            ctypes.memmove(bits, bgra, len(bgra))
+            old = ctypes.windll.gdi32.SelectObject(mem_dc, dib)
+            blend = BLENDFUNCTION(0, 0, 255, 1)  # AC_SRC_OVER, AC_SRC_ALPHA
+            src_pt = POINT(0, 0)
+            dst_pt = POINT(int(self.winfo_x()), int(self.winfo_y()))
+            size = SIZE(w, h)
+            ULW_ALPHA = 0x00000002
+            ok = ctypes.windll.user32.UpdateLayeredWindow(
+                hwnd,
+                screen_dc,
+                ctypes.byref(dst_pt),
+                ctypes.byref(size),
+                mem_dc,
+                ctypes.byref(src_pt),
+                0,
+                ctypes.byref(blend),
+                ULW_ALPHA,
+            )
+            ctypes.windll.gdi32.SelectObject(mem_dc, old)
+            ctypes.windll.gdi32.DeleteObject(dib)
+            ctypes.windll.gdi32.DeleteDC(mem_dc)
+            ctypes.windll.user32.ReleaseDC(0, screen_dc)
+            return bool(ok)
+        except Exception:
+            return False
 
     def _ensure_mini_bar(self):
         if hasattr(self, "mini_bar"):
@@ -808,6 +940,7 @@ class Hud(tk.Tk):
         self._mini_secondary = {}
         self._mini_fault = None
         self._drag = None
+        self._mini_layered = False
         for seq, fn in (
             ("<ButtonPress-1>", self._mini_press),
             ("<B1-Motion>", self._mini_motion),
@@ -815,7 +948,17 @@ class Hud(tk.Tk):
         ):
             self.mini_label.bind(seq, fn)
             self.mini_bar.bind(seq, fn)
-        self.mini_label.bind("<Configure>", lambda e: self._redraw_capsule())
+
+    def _bind_mini_root(self, enabled: bool):
+        for seq in ("<ButtonPress-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+            try:
+                self.unbind(seq)
+            except Exception:
+                pass
+        if enabled:
+            self.bind("<ButtonPress-1>", self._mini_press)
+            self.bind("<B1-Motion>", self._mini_motion)
+            self.bind("<ButtonRelease-1>", self._mini_release)
 
     def _mini_press(self, e):
         self._drag = (e.x_root, e.y_root, self.winfo_x(), self.winfo_y(), False)
@@ -831,6 +974,9 @@ class Hud(tk.Tk):
         self._drag = (x0, y0, wx, wy, moved)
         if moved:
             self.geometry(f"+{wx + dx}+{wy + dy}")
+            # Layered windows need an explicit reposition paint.
+            if getattr(self, "_mini_layered", False):
+                self._redraw_capsule()
 
     def _mini_release(self, e):
         dragged = bool(self._drag and self._drag[4])
@@ -849,14 +995,14 @@ class Hud(tk.Tk):
         c = color.lstrip("#")
         return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
 
-    def _mini_font(self, size: int, bold: bool = False):
+    def _mini_font(self, size: int):
         if not HAS_PIL:
             return None
         if self.lang() == "zh":
             paths = [
                 r"C:\Windows\Fonts\msyh.ttc",
-                r"C:\Windows\Fonts\msyhbd.ttc",
                 r"C:\Windows\Fonts\simhei.ttf",
+                r"C:\Windows\Fonts\msyhbd.ttc",
             ]
         else:
             paths = [
@@ -871,115 +1017,113 @@ class Hud(tk.Tk):
                 continue
         return ImageFont.load_default()
 
-    def _mini_size(self) -> tuple[int, int]:
-        # Compact capsule; Chinese labels need a bit more width.
-        if self.lang() == "zh":
-            return 248, 34
-        return 228, 34
-
-    def _redraw_capsule(self):
-        if not hasattr(self, "mini_label"):
-            return
-        w, h = self._mini_size()
-        if HAS_PIL:
-            self._redraw_capsule_pil(w, h)
-        else:
-            self._redraw_capsule_canvas_fallback(w, h)
-
-    def _redraw_capsule_pil(self, w: int, h: int):
-        scale = 4  # supersample then hard-key → smoother silhouette than Tk arcs
-        W, H = w * scale, h * scale
-        chroma = self._hex_rgb(CHROMA)
-        panel = self._hex_rgb(PANEL)
-        outline = self._hex_rgb("#2a4a62")
-        hi = self._hex_rgb("#152536")
-
-        base = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(base)
-        pad = 2 * scale
-        box = [pad, pad, W - pad - 1, H - pad - 1]
-        radius = (box[3] - box[1]) / 2
-        draw.rounded_rectangle(box, radius=radius, fill=panel + (255,), outline=outline + (255,), width=scale)
-        # soft inner sheen
-        ib = [pad + 2 * scale, pad + 2 * scale, W - pad - 1 - 2 * scale, pad + int(9 * scale)]
-        if ib[2] > ib[0] and ib[3] > ib[1]:
-            draw.rounded_rectangle(ib, radius=radius * 0.55, fill=hi + (220,))
-
-        img = base.resize((w, h), Image.Resampling.LANCZOS)
-        # Hard chroma key after downsample (keeps edge smooth vs native Tk)
-        rgba = img.split()
-        rgb = Image.merge("RGB", rgba[:3])
-        alpha = rgba[3]
-        out = Image.new("RGB", (w, h), chroma)
-        out.paste(rgb, mask=alpha.point(lambda a: 255 if a >= 96 else 0))
-
-        d = ImageDraw.Draw(out)
-        lab_font = self._mini_font(10)
-        pct_font = self._mini_font(11)
-
+    def _mini_metrics(self) -> tuple[int, int, object, object, list]:
+        """Return w,h, fonts and drawable text clusters based on current values."""
+        # Restore pre-shrink visual type size; keep padding tight (small border).
+        lab_font = self._mini_font(12)
+        pct_font = self._mini_font(13)
         if self._mini_fault:
-            d.text((w / 2, h / 2), "ERR", fill=self._hex_rgb(RED), font=pct_font, anchor="mm")
+            text_w = 48
+            clusters = [("ERR", RED, pct_font)]
         else:
             p = float((self._mini_primary or {}).get("used_percent") or 0)
             s = float((self._mini_secondary or {}).get("used_percent") or 0)
             lab5 = self.t("card5_compact")
             lab7 = self.t("card7_compact")
-            t5 = f"{lab5} {p:4.1f}%"
-            t7 = f"{lab7} {s:4.1f}%"
-            # measure clusters
-            def tw(text, font):
-                box = d.textbbox((0, 0), text, font=font)
-                return box[2] - box[0]
-
-            # draw label muted + pct colored separately for each cluster
-            gap = 14
             c5 = f"{p:4.1f}%"
             c7 = f"{s:4.1f}%"
-            w_lab5 = tw(lab5 + " ", lab_font)
-            w_pct5 = tw(c5, pct_font)
-            w_lab7 = tw(lab7 + " ", lab_font)
-            w_pct7 = tw(c7, pct_font)
-            total = w_lab5 + w_pct5 + gap + w_lab7 + w_pct7
+            clusters = [
+                (lab5 + " ", MUTED, lab_font),
+                (c5, self._pct_color(p), pct_font),
+                (lab7 + " ", MUTED, lab_font),
+                (c7, self._pct_color(s), pct_font),
+            ]
+        # Measure with a scratch image
+        scratch = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+        widths = []
+        for text, _col, font in clusters:
+            box = scratch.textbbox((0, 0), text, font=font)
+            widths.append(box[2] - box[0])
+        gap = 12
+        content_w = widths[0] + widths[1] + (0 if self._mini_fault else gap + widths[2] + widths[3])
+        pad_x = 12  # tight side padding
+        pad_y = 6
+        w = content_w + pad_x * 2
+        h = 36  # slim border, fonts stay readable
+        return w, h, lab_font, pct_font, clusters
+
+    def _redraw_capsule(self):
+        if not hasattr(self, "mini_label"):
+            return
+        if not HAS_PIL:
+            return
+        w, h, lab_font, pct_font, clusters = self._mini_metrics()
+        # Keep Tk geometry matched to bitmap
+        try:
+            self.geometry(f"{w}x{h}+{self.winfo_x()}+{self.winfo_y()}")
+        except Exception:
+            self.geometry(f"{w}x{h}")
+
+        scale = 4
+        W, H = w * scale, h * scale
+        panel = self._hex_rgb(PANEL)
+        outline = self._hex_rgb("#2f5a72")
+        hi = self._hex_rgb("#1a2f42")
+
+        base = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(base)
+        pad = 1 * scale
+        box = [pad, pad, W - pad - 1, H - pad - 1]
+        radius = (box[3] - box[1]) / 2
+        # Slightly translucent outline via dual pass for softer rim
+        draw.rounded_rectangle(box, radius=radius, fill=panel + (255,))
+        draw.rounded_rectangle(box, radius=radius, outline=outline + (160,), width=max(1, scale // 2))
+        ib = [pad + 2 * scale, pad + 2 * scale, W - pad - 1 - 2 * scale, pad + int(8 * scale)]
+        if ib[2] > ib[0] and ib[3] > ib[1]:
+            draw.rounded_rectangle(ib, radius=radius * 0.55, fill=hi + (180,))
+
+        img = base.resize((w, h), Image.Resampling.LANCZOS)
+        d = ImageDraw.Draw(img)
+        if self._mini_fault:
+            d.text((w / 2, h / 2), "ERR", fill=self._hex_rgb(RED) + (255,), font=pct_font, anchor="mm")
+        else:
+            scratch = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+            widths = []
+            for text, _col, font in clusters:
+                box = scratch.textbbox((0, 0), text, font=font)
+                widths.append(box[2] - box[0])
+            gap = 12
+            total = widths[0] + widths[1] + gap + widths[2] + widths[3]
             x = (w - total) / 2
             y = h / 2
-            d.text((x, y), lab5 + " ", fill=self._hex_rgb(MUTED), font=lab_font, anchor="lm")
-            x += w_lab5
-            d.text((x, y), c5, fill=self._hex_rgb(self._pct_color(p)), font=pct_font, anchor="lm")
-            x += w_pct5 + gap
-            # tiny separator
-            d.ellipse((x - gap / 2 - 1.2, y - 1.2, x - gap / 2 + 1.2, y + 1.2), fill=self._hex_rgb(CYAN_DIM))
-            d.text((x, y), lab7 + " ", fill=self._hex_rgb(MUTED), font=lab_font, anchor="lm")
-            x += w_lab7
-            d.text((x, y), c7, fill=self._hex_rgb(self._pct_color(s)), font=pct_font, anchor="lm")
+            d.text((x, y), clusters[0][0], fill=self._hex_rgb(clusters[0][1]) + (255,), font=clusters[0][2], anchor="lm")
+            x += widths[0]
+            d.text((x, y), clusters[1][0], fill=self._hex_rgb(clusters[1][1]) + (255,), font=clusters[1][2], anchor="lm")
+            x += widths[1] + gap
+            cx = x - gap / 2
+            d.ellipse((cx - 1.4, y - 1.4, cx + 1.4, y + 1.4), fill=self._hex_rgb(CYAN_DIM) + (255,))
+            d.text((x, y), clusters[2][0], fill=self._hex_rgb(clusters[2][1]) + (255,), font=clusters[2][2], anchor="lm")
+            x += widths[2]
+            d.text((x, y), clusters[3][0], fill=self._hex_rgb(clusters[3][1]) + (255,), font=clusters[3][2], anchor="lm")
 
+        if self._apply_layered_image(img):
+            # Layered bitmap is what the user sees; route input on the root window.
+            self._bind_mini_root(True)
+            return
+
+        # Fallback: chroma-key supersample (more jagged, but works)
+        chroma = self._hex_rgb(CHROMA)
+        rgba = img.split()
+        rgb = Image.merge("RGB", rgba[:3])
+        alpha = rgba[3]
+        out = Image.new("RGB", (w, h), chroma)
+        out.paste(rgb, mask=alpha.point(lambda a: 255 if a >= 72 else 0))
         self._mini_photo = ImageTk.PhotoImage(out)
         self.mini_label.configure(image=self._mini_photo)
-
-    def _redraw_capsule_canvas_fallback(self, w: int, h: int):
-        # Rare path if Pillow missing: keep a tiny canvas.
-        if not hasattr(self, "mini_canvas"):
-            self.mini_canvas = tk.Canvas(self.mini_bar, width=w, height=h, bg=CHROMA, highlightthickness=0, bd=0, cursor="hand2")
-            self.mini_canvas.pack(fill="both", expand=True)
-            self.mini_label.pack_forget()
-            self.mini_canvas.bind("<ButtonPress-1>", self._mini_press)
-            self.mini_canvas.bind("<B1-Motion>", self._mini_motion)
-            self.mini_canvas.bind("<ButtonRelease-1>", self._mini_release)
-        c = self.mini_canvas
-        c.delete("all")
-        c.configure(width=w, height=h)
-        r = h / 2 - 1
-        c.create_oval(1, 1, h - 1, h - 1, fill=PANEL, outline="#2a4a62")
-        c.create_oval(w - h + 1, 1, w - 1, h - 1, fill=PANEL, outline="#2a4a62")
-        c.create_rectangle(r, 1, w - r, h - 1, fill=PANEL, outline=PANEL)
-        c.create_line(r, 1, w - r, 1, fill="#2a4a62")
-        c.create_line(r, h - 1, w - r, h - 1, fill="#2a4a62")
-        if self._mini_fault:
-            c.create_text(w / 2, h / 2, text="ERR", fill=RED, font=self._font_tiny)
-            return
-        p = float((self._mini_primary or {}).get("used_percent") or 0)
-        s = float((self._mini_secondary or {}).get("used_percent") or 0)
-        text = f"{self.t('card5_compact')} {p:4.1f}%   {self.t('card7_compact')} {s:4.1f}%"
-        c.create_text(w / 2, h / 2, text=text, fill=TEXT, font=self._font_tiny)
+        try:
+            self.wm_attributes("-transparentcolor", CHROMA)
+        except Exception:
+            pass
 
     def _paint_mini(self, primary: dict | None = None, secondary: dict | None = None, fault: str | None = None):
         self._mini_primary = primary or {}
@@ -1005,8 +1149,8 @@ class Hud(tk.Tk):
             self._ensure_mini_bar()
             self.mini_bar.pack(fill="both", expand=True)
             self._set_mini_chrome(True)
-            self.minsize(200, 28)
-            self.maxsize(280, 40)
+            self.minsize(160, 30)
+            self.maxsize(420, 48)
             with self._lock:
                 data = self._data
                 msg = self._msg
@@ -1087,7 +1231,7 @@ class Hud(tk.Tk):
         h = int(self.winfo_reqheight())
         mode = self.mode()
         if mode == "mini":
-            w, h = self._mini_size()
+            w, h, *_ = self._mini_metrics()
         elif mode == "compact":
             w = max(w, 340)
             h = max(h, 220)
