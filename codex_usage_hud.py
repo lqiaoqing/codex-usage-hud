@@ -124,6 +124,27 @@ STRINGS = {
 }
 
 
+EXTRA_ROWS = {
+    "en": [
+        ("credits.balance", "{balance}"),
+        ("credits.has", "{has_credits}   unlimited={unlimited}"),
+        ("banked.resets", "{banked_resets}   applicable={banked_applicable}"),
+        ("reached.type", "{reached_type}"),
+        ("source", "chatgpt.com/backend-api/wham/usage"),
+        ("note", "5h AND 7d must both have remaining quota"),
+    ],
+    "zh": [
+        ("积分余额", "{balance}"),
+        ("是否有积分", "{has_credits}   不限量={unlimited}"),
+        ("储蓄重置次数", "{banked_resets}   可用={banked_applicable}"),
+        ("触达类型", "{reached_type}"),
+        ("数据来源", "chatgpt.com/backend-api/wham/usage"),
+        ("说明", "5小时和7天额度都要有剩余才能继续用"),
+    ],
+}
+
+
+
 def load_ui_config() -> dict:
     data = _read_json(CONFIG_PATH) or {}
     if not isinstance(data, dict):
@@ -373,22 +394,45 @@ class Hud(tk.Tk):
         return text
 
     def _apply_fonts(self):
-        zh = self.lang() == "zh"
-        family = "Microsoft YaHei" if zh else "Consolas"
-        self._font_title.configure(family=family, size=12 if zh else 13, weight="bold")
-        self._font_mono.configure(family=family, size=9)
-        self._font_big.configure(family=family, size=18 if zh else 20, weight="bold")
-        self._font_tiny.configure(family=family, size=8)
+        # Numbers / English stay Consolas in both languages.
+        # Chinese labels use YaHei at the same point sizes (no scale-up).
+        self._font_title.configure(family="Consolas", size=13, weight="bold")
+        self._font_mono.configure(family="Consolas", size=9)
+        self._font_big.configure(family="Consolas", size=20, weight="bold")
+        self._font_tiny.configure(family="Consolas", size=8)
+        cjk = "Microsoft YaHei UI"
+        try:
+            tkfont.Font(family=cjk, size=9).actual()
+        except Exception:
+            cjk = "Microsoft YaHei"
+        if not hasattr(self, "_font_cjk"):
+            self._font_cjk = tkfont.Font(family=cjk, size=9)
+            self._font_cjk_tiny = tkfont.Font(family=cjk, size=8)
+        else:
+            self._font_cjk.configure(family=cjk, size=9)
+            self._font_cjk_tiny.configure(family=cjk, size=8)
 
     def _build(self):
         header = tk.Frame(self, bg=BG)
         header.pack(fill="x", padx=14, pady=(12, 6))
         self.brand = tk.Label(header, text=self.t("brand"), fg=CYAN, bg=BG, font=self._font_title)
         self.brand.pack(side="left")
-        self.hdr_status = tk.Label(header, text=self.t("online"), fg=MUTED, bg=BG, font=self._font_tiny)
-        self.hdr_status.pack(side="right")
-        self.lang_btn = self._btn(header, self.t("lang_switch"), self.toggle_lang)
-        self.lang_btn.pack(side="right", padx=(0, 8))
+        right = tk.Frame(header, bg=BG)
+        right.pack(side="right")
+        self.lang_btn = self._btn(right, self.t("lang_switch"), self.toggle_lang)
+        self.lang_btn.configure(width=4)
+        self.lang_btn.pack(side="left")
+        # Fixed character width so countdown digits never shove the EN/中文 button.
+        self.hdr_status = tk.Label(
+            right,
+            text=self.t("online"),
+            fg=MUTED,
+            bg=BG,
+            font=self._font_tiny,
+            width=10,
+            anchor="e",
+        )
+        self.hdr_status.pack(side="left", padx=(8, 0))
 
         self.meta = tk.Label(self, text=self.t("boot"), fg=MUTED, bg=BG, font=self._font_mono, anchor="w", justify="left")
         self.meta.pack(fill="x", padx=14)
@@ -399,20 +443,17 @@ class Hud(tk.Tk):
         extra = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
         self.extra_wrap = extra
         extra.pack(fill="both", expand=True, padx=14, pady=8)
-        self.extra = tk.Text(
-            extra,
-            height=6,
-            wrap="word",
-            bg=PANEL,
-            fg=TEXT,
-            insertbackground=CYAN,
-            relief="flat",
-            font=self._font_mono,
-            padx=8,
-            pady=8,
-        )
-        self.extra.pack(fill="both", expand=True)
-        self.extra.configure(state="disabled")
+        self.extra_body = tk.Frame(extra, bg=PANEL)
+        self.extra_body.pack(fill="both", expand=True, padx=10, pady=8)
+        self.extra_rows = []
+        for _ in range(6):
+            row = tk.Frame(self.extra_body, bg=PANEL)
+            row.pack(fill="x", pady=1)
+            lab = tk.Label(row, text="", fg=MUTED, bg=PANEL, font=self._font_cjk, width=12, anchor="w")
+            lab.pack(side="left")
+            val = tk.Label(row, text="", fg=TEXT, bg=PANEL, font=self._font_mono, anchor="w")
+            val.pack(side="left", fill="x", expand=True)
+            self.extra_rows.append((lab, val))
 
         ctrl = tk.Frame(self, bg=BG)
         self.ctrl = ctrl
@@ -526,15 +567,26 @@ class Hud(tk.Tk):
     def apply_lang(self):
         self._apply_fonts()
         self.title(self.t("window_title"))
-        self.brand.configure(text=self.t("brand"))
-        self.lang_btn.configure(text=self.t("lang_switch"))
-        self.refresh_label.configure(text=self.t("refresh_label"))
-        self.apply_btn.configure(text=self.t("apply"))
-        self.pin_btn.configure(text=self.t("pin"))
-        self.sync_btn.configure(text=self.t("sync_now"))
-        self.open_btn.configure(text=self.t("open_usage"))
+        self.brand.configure(text=self.t("brand"), font=self._font_title)
+        self.lang_btn.configure(text=self.t("lang_switch"), font=self._font_tiny, width=4)
+        self.refresh_label.configure(text=self.t("refresh_label"), font=self._tiny_label_font())
+        self.apply_btn.configure(text=self.t("apply"), font=self._font_tiny)
+        self.pin_btn.configure(text=self.t("pin"), font=self._tiny_label_font())
+        self.sync_btn.configure(text=self.t("sync_now"), font=self._font_tiny)
+        self.open_btn.configure(text=self.t("open_usage"), font=self._font_tiny)
+        self.mode_btn.configure(font=self._font_tiny)
+        self.hdr_status.configure(font=self._font_tiny)
+        self.meta.configure(font=self._label_font())
+        for card in (self.card5, self.card7):
+            card["title"].configure(font=self._tiny_label_font())
+            card["pct"].configure(font=self._font_big)
+            card["detail"].configure(font=self._label_font())
+        for lab, val in self.extra_rows:
+            lab.configure(font=self._label_font(), width=12)
+            val.configure(font=self._font_mono)
         if hasattr(self, "compact_sync_btn"):
-            self.compact_sync_btn.configure(text=self.t("sync"))
+            self.compact_sync_btn.configure(text=self.t("sync"), font=self._font_tiny)
+            self.compact_mode_btn.configure(font=self._font_tiny)
         self.apply_mode()
         if self._msg not in ("BOOT",):
             self._paint()
@@ -557,7 +609,7 @@ class Hud(tk.Tk):
         self._tick += 1
         remain = max(0, int(self._next_due - time.monotonic()))
         blink = "_" if (self._tick % 2 == 0) else " "
-        self.hdr_status.configure(text=f"T-{remain:03d}s  {blink}")
+        self.hdr_status.configure(text=f"T-{remain:03d}s{blink}")
         self.after(500, self._pulse)
 
     def refresh_now(self):
@@ -575,11 +627,23 @@ class Hud(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _set_extra(self, content: str):
-        self.extra.configure(state="normal")
-        self.extra.delete("1.0", "end")
-        self.extra.insert("1.0", content)
-        self.extra.configure(state="disabled")
+    def _set_extra(self, content: str | None = None, rows=None):
+        if rows is None:
+            rows = [("", content or "")]
+        for i, (lab, val) in enumerate(self.extra_rows):
+            if i < len(rows):
+                k, v = rows[i]
+                lab.configure(text=k)
+                val.configure(text=str(v))
+            else:
+                lab.configure(text="")
+                val.configure(text="")
+
+    def _label_font(self):
+        return self._font_cjk if self.lang() == "zh" else self._font_mono
+
+    def _tiny_label_font(self):
+        return self._font_cjk_tiny if self.lang() == "zh" else self._font_tiny
 
     def _fmt_err(self, msg: str) -> str:
         mapping = {
@@ -618,8 +682,8 @@ class Hud(tk.Tk):
             data = self._data
         if msg != "ok" or not data:
             shown = self._fmt_err(msg)
-            self.meta.configure(text=self.t("fault", msg=shown))
-            self._set_extra(shown)
+            self.meta.configure(text=self.t("fault", msg=shown), font=self._label_font())
+            self._set_extra(rows=[("", shown)])
             return
         s = summarize(data)
         status = self.t("state_ok") if s.get("allowed") and not s.get("limit_reached") else self.t("state_limit")
@@ -630,22 +694,28 @@ class Hud(tk.Tk):
                 plan=str(s.get("plan") or "-").upper(),
                 status=status,
                 checked_at=s.get("checked_at"),
-            )
+            ),
+            font=self._label_font(),
         )
         self._paint_card(self.card5, s.get("primary") or {})
         self._paint_card(self.card7, s.get("secondary") or {})
         credits = s.get("credits") or {}
-        self._set_extra(
-            self.t(
-                "extra",
-                balance=credits.get("balance"),
-                has_credits=credits.get("has_credits"),
-                unlimited=credits.get("unlimited"),
-                banked_resets=s.get("banked_resets"),
-                banked_applicable=s.get("banked_applicable"),
-                reached_type=s.get("reached_type"),
-            )
-        )
+        fmt = {
+            "balance": credits.get("balance"),
+            "has_credits": credits.get("has_credits"),
+            "unlimited": credits.get("unlimited"),
+            "banked_resets": s.get("banked_resets"),
+            "banked_applicable": s.get("banked_applicable"),
+            "reached_type": s.get("reached_type"),
+        }
+        rows = []
+        for label, template in EXTRA_ROWS.get(self.lang()) or EXTRA_ROWS["en"]:
+            try:
+                value = template.format(**fmt)
+            except Exception:
+                value = template
+            rows.append((label, value))
+        self._set_extra(rows=rows)
 
     def is_compact(self) -> bool:
         return str(self._cfg.get("mode") or "detail") == "compact"
