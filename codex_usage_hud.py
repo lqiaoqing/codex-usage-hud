@@ -31,6 +31,7 @@ RED = "#ff5c7a"
 TEXT = "#d7e2ee"
 MUTED = "#7b8ea3"
 GRID = "#12202e"
+CHROMA = "#ff00ff"  # mini capsule transparency key (Windows)
 
 DEFAULT_REFRESH_SEC = 60
 MIN_REFRESH_SEC = 5
@@ -601,12 +602,8 @@ class Hud(tk.Tk):
             self.mini_btn.configure(text=self.t("mini"), font=self._font_tiny)
         if hasattr(self, "compact_mini_btn"):
             self.compact_mini_btn.configure(text=self.t("mini"), font=self._font_tiny)
-        if hasattr(self, "mini_expand_btn"):
-            self.mini_expand_btn.configure(text=self.t("expand"), font=self._font_tiny)
-            self.mini_5_lab.configure(font=self._font_tiny)
-            self.mini_7_lab.configure(font=self._font_tiny)
-            self.mini_5_pct.configure(font=self._font_mono)
-            self.mini_7_pct.configure(font=self._font_mono)
+        if self.is_mini():
+            self._redraw_capsule()
         self.apply_mode()
         if self._msg not in ("BOOT",):
             self._paint()
@@ -775,44 +772,128 @@ class Hud(tk.Tk):
         save_ui_config(self._cfg)
         self.apply_mode()
 
+    def _set_mini_chrome(self, enabled: bool):
+        if enabled:
+            self.overrideredirect(True)
+            self.configure(bg=CHROMA)
+            try:
+                self.wm_attributes("-transparentcolor", CHROMA)
+            except Exception:
+                pass
+            self.attributes("-topmost", True)
+        else:
+            try:
+                self.wm_attributes("-transparentcolor", "")
+            except Exception:
+                pass
+            self.overrideredirect(False)
+            self.configure(bg=BG)
+            self.attributes("-topmost", bool(self._cfg.get("topmost", True)))
+
     def _ensure_mini_bar(self):
         if hasattr(self, "mini_bar"):
             return
-        self.mini_bar = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
-        inner = tk.Frame(self.mini_bar, bg=PANEL)
-        inner.pack(fill="both", expand=True, padx=10, pady=8)
-        self.mini_5_lab = tk.Label(inner, text="5H", fg=MUTED, bg=PANEL, font=self._font_tiny)
-        self.mini_5_lab.pack(side="left")
-        self.mini_5_pct = tk.Label(inner, text="--.-%", fg=CYAN, bg=PANEL, font=self._font_mono)
-        self.mini_5_pct.pack(side="left", padx=(4, 12))
-        self.mini_7_lab = tk.Label(inner, text="7D", fg=MUTED, bg=PANEL, font=self._font_tiny)
-        self.mini_7_lab.pack(side="left")
-        self.mini_7_pct = tk.Label(inner, text="--.-%", fg=CYAN, bg=PANEL, font=self._font_mono)
-        self.mini_7_pct.pack(side="left", padx=(4, 12))
-        self.mini_expand_btn = self._btn(inner, self.t("expand"), self.expand_from_mini)
-        self.mini_expand_btn.pack(side="right")
-        # Click anywhere on the capsule to expand.
-        for w in (self.mini_bar, inner, self.mini_5_lab, self.mini_5_pct, self.mini_7_lab, self.mini_7_pct):
-            w.bind("<Button-1>", lambda e: self.expand_from_mini())
-            w.configure(cursor="hand2")
+        self.mini_bar = tk.Frame(self, bg=CHROMA, highlightthickness=0, bd=0)
+        self.mini_canvas = tk.Canvas(
+            self.mini_bar,
+            width=300,
+            height=44,
+            bg=CHROMA,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.mini_canvas.pack(fill="both", expand=True)
+        self._mini_primary = {}
+        self._mini_secondary = {}
+        self._mini_fault = None
+        self._drag = None
+        c = self.mini_canvas
+        c.bind("<ButtonPress-1>", self._mini_press)
+        c.bind("<B1-Motion>", self._mini_motion)
+        c.bind("<ButtonRelease-1>", self._mini_release)
+        c.bind("<Configure>", lambda e: self._redraw_capsule())
+
+    def _mini_press(self, e):
+        self._drag = (e.x_root, e.y_root, self.winfo_x(), self.winfo_y(), False)
+
+    def _mini_motion(self, e):
+        if not self._drag:
+            return
+        x0, y0, wx, wy, moved = self._drag
+        dx = e.x_root - x0
+        dy = e.y_root - y0
+        if abs(dx) + abs(dy) > 5:
+            moved = True
+        self._drag = (x0, y0, wx, wy, moved)
+        if moved:
+            self.geometry(f"+{wx + dx}+{wy + dy}")
+
+    def _mini_release(self, e):
+        dragged = bool(self._drag and self._drag[4])
+        self._drag = None
+        if not dragged:
+            self.expand_from_mini()
+
+    def _pct_color(self, used: float) -> str:
+        if used >= 90:
+            return RED
+        if used >= 70:
+            return AMBER
+        return CYAN
+
+    def _redraw_capsule(self):
+        if not hasattr(self, "mini_canvas"):
+            return
+        c = self.mini_canvas
+        c.delete("all")
+        w = max(int(c.winfo_width()), 280)
+        h = max(int(c.winfo_height()), 44)
+        r = h / 2
+        # Capsule body (ellipse ends + middle).
+        c.create_oval(1, 1, h - 1, h - 1, fill=PANEL, outline=LINE, width=1)
+        c.create_oval(w - h + 1, 1, w - 1, h - 1, fill=PANEL, outline=LINE, width=1)
+        c.create_rectangle(r, 1, w - r, h - 1, fill=PANEL, outline=PANEL)
+        c.create_line(r, 1, w - r, 1, fill=LINE)
+        c.create_line(r, h - 1, w - r, h - 1, fill=LINE)
+
+        if self._mini_fault:
+            c.create_text(w / 2, h / 2, text="ERR", fill=RED, font=self._font_mono)
+            return
+
+        p = float((self._mini_primary or {}).get("used_percent") or 0)
+        s = float((self._mini_secondary or {}).get("used_percent") or 0)
+        lab5 = self.t("card5_compact")
+        lab7 = self.t("card7_compact")
+        y = h / 2
+        # Layout: [lab5 pct5] gap [lab7 pct7], centered as a group.
+        gap = 18
+        parts = [
+            (lab5, MUTED, self._font_tiny),
+            (f" {p:4.1f}%", self._pct_color(p), self._font_mono),
+            (" " * 2, MUTED, self._font_tiny),
+            (lab7, MUTED, self._font_tiny),
+            (f" {s:4.1f}%", self._pct_color(s), self._font_mono),
+        ]
+        widths = []
+        for text, _col, font in parts:
+            widths.append(font.measure(text))
+        total = sum(widths) + gap
+        x = (w - total) / 2
+        # first cluster
+        c.create_text(x, y, text=parts[0][0], fill=parts[0][1], font=parts[0][2], anchor="w")
+        x += widths[0]
+        c.create_text(x, y, text=parts[1][0], fill=parts[1][1], font=parts[1][2], anchor="w")
+        x += widths[1] + gap
+        c.create_text(x, y, text=parts[3][0], fill=parts[3][1], font=parts[3][2], anchor="w")
+        x += widths[3]
+        c.create_text(x, y, text=parts[4][0], fill=parts[4][1], font=parts[4][2], anchor="w")
 
     def _paint_mini(self, primary: dict | None = None, secondary: dict | None = None, fault: str | None = None):
-        if not hasattr(self, "mini_5_pct"):
-            return
-        if fault:
-            self.mini_5_pct.configure(text="ERR", fg=RED)
-            self.mini_7_pct.configure(text="--", fg=MUTED)
-            return
-        p = float((primary or {}).get("used_percent") or 0)
-        s = float((secondary or {}).get("used_percent") or 0)
-        pc = RED if p >= 90 else AMBER if p >= 70 else CYAN
-        sc = RED if s >= 90 else AMBER if s >= 70 else CYAN
-        self.mini_5_lab.configure(text=self.t("card5_compact"))
-        self.mini_7_lab.configure(text=self.t("card7_compact"))
-        self.mini_5_pct.configure(text=f"{p:4.1f}%", fg=pc)
-        self.mini_7_pct.configure(text=f"{s:4.1f}%", fg=sc)
-        if hasattr(self, "mini_expand_btn"):
-            self.mini_expand_btn.configure(text=self.t("expand"))
+        self._mini_primary = primary or {}
+        self._mini_secondary = secondary or {}
+        self._mini_fault = fault
+        self._redraw_capsule()
 
     def apply_mode(self):
         mode = self.mode()
@@ -825,21 +906,15 @@ class Hud(tk.Tk):
                     w.pack_forget()
                 except Exception:
                     pass
-            # brand.master is header frame
             self.card5["wrap"].pack_forget()
             self.card7["wrap"].pack_forget()
             if hasattr(self, "compact_bar"):
                 self.compact_bar.pack_forget()
-            # Hide full header (lang/status) in mini — keep window light.
-            for child in self.winfo_children():
-                # only forget known chrome; mini_bar created later
-                pass
-            self.brand.master.pack_forget()
             self._ensure_mini_bar()
-            self.mini_bar.pack(fill="both", expand=True, padx=6, pady=6)
-            self.minsize(260, 52)
-            self.maxsize(420, 80)
-            # refresh mini numbers from last paint cache
+            self.mini_bar.pack(fill="both", expand=True)
+            self._set_mini_chrome(True)
+            self.minsize(240, 40)
+            self.maxsize(360, 56)
             with self._lock:
                 data = self._data
                 msg = self._msg
@@ -851,9 +926,13 @@ class Hud(tk.Tk):
             else:
                 self._paint_mini()
             self._fit_window()
+            self.after(30, self._redraw_capsule)
             return
 
-        # restore header when leaving mini
+        # Leaving mini: restore normal window chrome + header.
+        if hasattr(self, "mini_bar"):
+            self.mini_bar.pack_forget()
+        self._set_mini_chrome(False)
         if not self.brand.master.winfo_ismapped():
             self.brand.master.pack(fill="x", padx=14, pady=(12, 6))
 
@@ -916,8 +995,7 @@ class Hud(tk.Tk):
         h = int(self.winfo_reqheight())
         mode = self.mode()
         if mode == "mini":
-            w = max(w, 280)
-            h = max(h, 56)
+            w, h = (320, 44) if self.lang() == "zh" else (300, 44)
         elif mode == "compact":
             w = max(w, 340)
             h = max(h, 220)
