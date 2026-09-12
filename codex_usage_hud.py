@@ -25,6 +25,8 @@ except Exception:
 CODEX_HOME = Path.home() / ".codex"
 AUTH_PATH = CODEX_HOME / "auth.json"
 CONFIG_PATH = Path.home() / ".codex_usage_hud.json"
+HWND_PATH = Path.home() / ".codex_usage_hud.hwnd"
+SINGLETON_MUTEX = "Local\\CodexUsageHud.SingleInstance"
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_PAGE = "https://chatgpt.com/codex/settings/usage"
 
@@ -331,6 +333,73 @@ def summarize(data: dict) -> dict:
     }
 
 
+
+def _focus_existing_hwnd(hwnd: int) -> bool:
+    user32 = ctypes.windll.user32
+    if not hwnd or not user32.IsWindow(hwnd):
+        return False
+    SW_RESTORE = 9
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    # Allow SetForegroundWindow from a second process.
+    try:
+        user32.AllowSetForegroundWindow(-1)  # ASFW_ANY
+    except Exception:
+        pass
+    foreground = user32.GetForegroundWindow()
+    tid_target = user32.GetWindowThreadProcessId(hwnd, None)
+    tid_this = ctypes.windll.kernel32.GetCurrentThreadId()
+    if foreground:
+        tid_fore = user32.GetWindowThreadProcessId(foreground, None)
+        if tid_fore and tid_this:
+            user32.AttachThreadInput(tid_fore, tid_this, True)
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        if tid_fore and tid_this:
+            user32.AttachThreadInput(tid_fore, tid_this, False)
+    else:
+        user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def acquire_single_instance() -> ctypes.c_void_p | None:
+    """Return mutex handle if this is the primary instance; otherwise focus existing and return None."""
+    kernel32 = ctypes.windll.kernel32
+    ERROR_ALREADY_EXISTS = 183
+    handle = kernel32.CreateMutexW(None, False, SINGLETON_MUTEX)
+    if not handle:
+        return ctypes.c_void_p(1)  # fail open: allow run
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        try:
+            hwnd = int(HWND_PATH.read_text(encoding="utf-8").strip())
+        except Exception:
+            hwnd = 0
+        if not _focus_existing_hwnd(hwnd):
+            # Fallback: find by title prefix.
+            titles = ["CODEX // USAGE", "CODEX // 用量"]
+            found = ctypes.c_void_p()
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def _enum(hwnd, _lparam):
+                buf = ctypes.create_unicode_buffer(512)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+                title = buf.value or ""
+                if any(title.startswith(t) or t in title for t in titles):
+                    found.value = hwnd
+                    return False
+                return True
+
+            ctypes.windll.user32.EnumWindows(_enum, 0)
+            if found.value:
+                _focus_existing_hwnd(int(found.value))
+        try:
+            kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+        return None
+    return handle
+
+
 class Meter(tk.Canvas):
     def __init__(self, master, height=18, **kw):
         super().__init__(master, height=height, bg=PANEL, highlightthickness=0, bd=0, **kw)
@@ -393,6 +462,7 @@ class Hud(tk.Tk):
         self.title(self.t("window_title"))
 
         self._build()
+        self.after(200, self._publish_hwnd)
         self.after(120, self.refresh_now)
         threading.Thread(target=self._loop, daemon=True).start()
         self.after(250, self._pulse)
@@ -1314,14 +1384,34 @@ class Hud(tk.Tk):
         except Exception:
             pos = ""
         self.geometry(f"{w}x{h}{pos}")
+        self.after(50, self._publish_hwnd)
+
+    def _publish_hwnd(self):
+        try:
+            hwnd = self._mini_hwnd() if self.is_mini() else int(self.winfo_id())
+            # Prefer top-level HWND.
+            parent = ctypes.windll.user32.GetParent(hwnd)
+            if parent:
+                hwnd = int(parent)
+            HWND_PATH.write_text(str(int(hwnd)), encoding="utf-8")
+        except Exception:
+            pass
 
     def on_close(self):
         self._stop.set()
+        try:
+            HWND_PATH.unlink(missing_ok=True)
+        except Exception:
+            pass
         self.destroy()
 
 
 def main():
+    mutex = acquire_single_instance()
+    if mutex is None:
+        return
     app = Hud()
+    app._singleton_mutex = mutex
     app.protocol("WM_DELETE_WINDOW", app.on_close)
     app.mainloop()
 
