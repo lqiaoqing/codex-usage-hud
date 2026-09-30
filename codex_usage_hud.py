@@ -62,6 +62,32 @@ ROLLOUT_TAIL_LIMIT = 32 * 1024 * 1024  # max bytes scanned backwards per task sw
 ROLLOUT_ID_RESCAN_SEC = 3  # min gap between full rescans when a selected id has no rollout yet
 LOG_DAY_DIRS = 2  # newest Codex desktop log day folders to watch
 LOG_TAIL_LIMIT = 16 * 1024 * 1024  # max bytes scanned backwards per log file on first sight
+ROLLOUT_FULL_SCAN_LIMIT = 512 * 1024 * 1024  # bigger rollouts: usage from the tail only, cost unknown
+ROLLOUT_READ_CHUNK = 8 * 1024 * 1024
+
+# Estimated task cost at OpenAI API list prices (Standard tier, short context), USD per 1M tokens.
+# Source: https://developers.openai.com/api/docs/pricing and the model pages
+# https://developers.openai.com/api/docs/models/<model-id>, checked 2026-09-30.
+# cache_write=None: no separate cache-write price published -> cache writes billed as normal input.
+# long_context: requests with > LONG_CONTEXT_TOKENS input are billed 2x input/cache and 1.5x output.
+# Not listed on purpose (no official API price): codex-auto-review (internal Codex slug), custom
+# providers. Override or add models via "model_prices" in the config file.
+MODEL_PRICES = {
+    "gpt-6.1-sol": {"input": 2.00, "cached_input": 0.10, "cache_write": 2.50, "output": 10.00, "long_context": True},
+    "gpt-6-astra": {"input": 10.00, "cached_input": 1.00, "cache_write": 12.50, "output": 50.00, "long_context": True},
+    "gpt-6-luna": {"input": 0.10, "cached_input": 0.01, "cache_write": 0.125, "output": 0.50, "long_context": True},
+    # GPT-5.6 Sol: promotional price, "available at least through November 21, 2026".
+    "gpt-5.6-sol": {"input": 4.00, "cached_input": 0.40, "cache_write": 5.00, "output": 20.00, "long_context": True},
+    "gpt-5.6-terra": {"input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 12.00, "long_context": True},
+    "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "cache_write": 0.25, "output": 1.20, "long_context": True},
+    "gpt-5.5": {"input": 5.00, "cached_input": 0.50, "cache_write": None, "output": 30.00, "long_context": True},
+    "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "cache_write": None, "output": 15.00, "long_context": True},
+    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "cache_write": None, "output": 4.50, "long_context": False},
+}
+MODEL_PRICES_SOURCE = "developers.openai.com/api/docs/pricing (2026-09-30)"
+LONG_CONTEXT_TOKENS = 272_000
+LONG_CONTEXT_INPUT_MULT = 2.0
+LONG_CONTEXT_OUTPUT_MULT = 1.5
 
 STRINGS = {
     "en": {
@@ -111,11 +137,14 @@ STRINGS = {
         "task_card_compact": "TASK",
         "task_none": "no local Codex session found",
         "task_wait": "no token data yet",
-        "task_title_line": "{title}   @{started}",
+        "task_title_line": "{title}   @{started}   {model}",
         "task_tokens_line": "TOTAL {total}   IN {inp}   OUT {out}",
         "task_cache_line": "CACHED {cached} ({hit:.1f}%)   REASONING {reasoning}",
         "task_ctx_line": "CTX {ctx} / {window}   UPDATED {age} AGO",
-        "task_compact_line": "TOTAL {total}   CTX {ctx} / {window}",
+        "task_compact_line": "TOTAL {total}   CTX {ctx} / {window}   ≈{cost}",
+        "task_cost_line": "API EST ≈ {total}   IN {inp}  CACHED {cached}  OUT {out}",
+        "task_cost_unknown": "API EST —   no API price for {models}",
+        "task_cost_na": "API EST —",
         "mini_tokens": "TOK",
     },
     "zh": {
@@ -165,11 +194,14 @@ STRINGS = {
         "task_card_compact": "任务",
         "task_none": "未找到本地 Codex 会话",
         "task_wait": "暂无 token 数据",
-        "task_title_line": "{title}   @{started}",
+        "task_title_line": "{title}   @{started}   {model}",
         "task_tokens_line": "总计 {total}   输入 {inp}   输出 {out}",
         "task_cache_line": "缓存 {cached}（命中 {hit:.1f}%）   推理 {reasoning}",
         "task_ctx_line": "上下文 {ctx} / {window}   {age}前更新",
-        "task_compact_line": "总计 {total}   上下文 {ctx} / {window}",
+        "task_compact_line": "总计 {total}   上下文 {ctx} / {window}   ≈{cost}",
+        "task_cost_line": "API 估价 ≈ {total}   输入 {inp}  缓存 {cached}  输出 {out}",
+        "task_cost_unknown": "API 估价 —   {models} 无公开 API 价格",
+        "task_cost_na": "API 估价 —",
         "mini_tokens": "总量",
     },
 }
@@ -661,6 +693,8 @@ class TaskUsageReader:
         self._id_scan_at = 0.0
         self._selection = None  # last (iso_ts, id | None) from the desktop log
         self._source = "latest"
+        self._tally: CostTally | None = CostTally()
+        self._model: str | None = None
         self._candidates: list[str] = []
         self._scan_at = 0.0
         self._stat: dict[str, tuple[int, float, float]] = {}  # path -> (size, mtime, activity)
@@ -780,6 +814,64 @@ class TaskUsageReader:
                         self._usage = ev
                         return
 
+    def _consume(self, raw: bytes):
+        """Handle one complete rollout line (turn_context model / token_count usage)."""
+        if b'"turn_context"' in raw[:256]:
+            try:
+                d = json.loads(raw.decode("utf-8", "replace"))
+            except Exception:
+                return
+            if isinstance(d, dict) and d.get("type") == "turn_context":
+                model = (d.get("payload") or {}).get("model")
+                if self._tally is not None:
+                    self._tally.on_model(model)
+                if model:
+                    self._model = str(model)
+            return
+        ev = _parse_token_line(raw)
+        if not ev:
+            return
+        self._last_event_ts = ev["ts"] or self._last_event_ts
+        if ev["rate_limits"]:
+            self._rate_limits = ev["rate_limits"]
+        if ev["info"]:
+            self._usage = ev
+            if self._tally is not None:
+                self._tally.on_usage(ev["info"])
+
+    def _scan_full(self, path: str, size: int) -> bool:
+        """Parse the whole rollout forward (model history + cost). Returns False if too big."""
+        self._usage = None
+        self._last_event_ts = None
+        self._rate_limits = None
+        self._model = None
+        self._tally = CostTally()
+        self._offset = 0
+        if size > ROLLOUT_FULL_SCAN_LIMIT:
+            self._tally = None
+            return False
+        try:
+            with open(path, "rb") as fh:
+                carry = b""
+                pos = 0
+                while pos < size:
+                    chunk = fh.read(min(ROLLOUT_READ_CHUNK, size - pos))
+                    if not chunk:
+                        break
+                    pos += len(chunk)
+                    buf = carry + chunk
+                    cut = buf.rfind(b"\n")
+                    if cut < 0:
+                        carry = buf
+                        continue
+                    for raw in buf[:cut].split(b"\n"):
+                        self._consume(raw)
+                    carry = buf[cut + 1:]
+                    self._offset = pos - len(carry)
+        except OSError:
+            pass
+        return True
+
     def _read_forward(self, path: str, size: int):
         try:
             with open(path, "rb") as fh:
@@ -792,14 +884,7 @@ class TaskUsageReader:
             return  # wait for the line to finish
         self._offset += cut + 1
         for raw in data[:cut].split(b"\n"):
-            ev = _parse_token_line(raw)
-            if not ev:
-                continue
-            self._last_event_ts = ev["ts"] or self._last_event_ts
-            if ev["rate_limits"]:
-                self._rate_limits = ev["rate_limits"]
-            if ev["info"]:
-                self._usage = ev
+            self._consume(raw)
 
     def _title_for(self, sid: str | None) -> str | None:
         if not sid:
@@ -866,17 +951,18 @@ class TaskUsageReader:
             return None
         if path != self._path or size < self._offset:
             self._path = path
-            self._scan_backwards(path, size)
-            # resume forward reads from the last complete line
-            self._offset = size
-            try:
-                with open(path, "rb") as fh:
-                    if size:
-                        fh.seek(size - 1)
-                        if fh.read(1) != b"\n":
-                            self._offset = self._line_start(fh, size)
-            except OSError:
-                pass
+            if not self._scan_full(path, size):
+                # Huge file: newest usage from the tail only; cost left unknown.
+                self._scan_backwards(path, size)
+                self._offset = size
+                try:
+                    with open(path, "rb") as fh:
+                        if size:
+                            fh.seek(size - 1)
+                            if fh.read(1) != b"\n":
+                                self._offset = self._line_start(fh, size)
+                except OSError:
+                    pass
         elif size > self._offset:
             self._read_forward(path, size)
         return self.snapshot()
@@ -923,11 +1009,15 @@ class TaskUsageReader:
             "source": self._source,  # "selected" (open in Codex UI) or "latest" (last written)
             "selected_id": (self._selection or (None, None))[1],
             "selected_at": (self._selection or (None, None))[0],
+            "model": self._model,
+            "cost_buckets": (
+                {k: dict(v) for k, v in self._tally.buckets.items()} if self._tally is not None else None
+            ),
         }
 
 
-def task_view(snap: dict | None) -> dict | None:
-    """Derive display numbers from a TaskUsageReader snapshot."""
+def task_view(snap: dict | None, prices: dict | None = None) -> dict | None:
+    """Derive display numbers from a TaskUsageReader snapshot (cost only when prices given)."""
     if not snap or not snap.get("has_usage"):
         return None
     total = snap.get("total") or {}
@@ -953,7 +1043,140 @@ def task_view(snap: dict | None) -> dict | None:
         "ctx": ctx,
         "window": window,
         "ctx_pct": min(100.0, ctx * 100.0 / window) if window else 0.0,
+        "model": snap.get("model"),
+        "cost": estimate_cost(snap.get("cost_buckets"), prices) if prices is not None else None,
     }
+
+
+_DATE_SUFFIX_RE = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+)
+
+
+def merged_model_prices(cfg: dict | None) -> dict:
+    """Built-in price table updated with the user's "model_prices" overrides (USD per 1M)."""
+    prices = {k: dict(v) for k, v in MODEL_PRICES.items()}
+    overrides = (cfg or {}).get("model_prices")
+    if not isinstance(overrides, dict):
+        return prices
+    for model, entry in overrides.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            item = {
+                "input": float(entry["input"]),
+                "cached_input": float(entry.get("cached_input", entry["input"])),
+                "output": float(entry["output"]),
+            }
+            cw = entry.get("cache_write")
+            item["cache_write"] = None if cw is None else float(cw)
+            item["long_context"] = bool(entry.get("long_context", True))
+        except Exception:
+            continue
+        prices[str(model).strip().lower()] = item
+    return prices
+
+
+def price_for(model: str | None, prices: dict) -> dict | None:
+    if not model:
+        return None
+    key = str(model).strip().lower()
+    return prices.get(key) or prices.get(_DATE_SUFFIX_RE.sub("", key))
+
+
+class CostTally:
+    """Attribute each token_count delta to the model active at that point.
+
+    Deltas of total_token_usage between consecutive token_count events (they match
+    last_token_usage in practice); if totals go backwards, last_token_usage is used.
+    Buckets are keyed by (model, long_context_request) and priced at display time,
+    so config price overrides apply without re-reading the rollout.
+    """
+
+    def __init__(self):
+        self.model: str | None = None
+        self.prev: dict | None = None
+        self.buckets: dict[tuple, dict] = {}
+
+    def on_model(self, model):
+        if model:
+            self.model = str(model)
+
+    def on_usage(self, info: dict):
+        tot = info.get("total_token_usage") or {}
+        last = info.get("last_token_usage") or {}
+        if not tot:
+            return
+
+        def _g(d, k):
+            try:
+                return int(d.get(k) or 0)
+            except Exception:
+                return 0
+
+        if self.prev is None:
+            delta = {k: _g(tot, k) for k in _USAGE_FIELDS}
+        else:
+            delta = {k: _g(tot, k) - _g(self.prev, k) for k in _USAGE_FIELDS}
+            if any(v < 0 for v in delta.values()):
+                delta = {k: _g(last, k) for k in _USAGE_FIELDS}
+        self.prev = tot
+        if not any(delta.values()):
+            return
+        is_long = _g(last, "input_tokens") > LONG_CONTEXT_TOKENS
+        b = self.buckets.setdefault((self.model, is_long), dict.fromkeys(_USAGE_FIELDS, 0))
+        for k, v in delta.items():
+            b[k] += v
+
+
+def estimate_cost(buckets: dict | None, prices: dict) -> dict | None:
+    """USD estimate from CostTally buckets. Unpriced models are reported, not guessed."""
+    if buckets is None:
+        return None
+    out = {"input": 0.0, "cached": 0.0, "output": 0.0, "total": 0.0,
+           "unknown_models": [], "unknown_tokens": 0, "models": {}}
+    for (model, is_long), b in buckets.items():
+        tokens = b["input_tokens"] + b["output_tokens"]
+        name = model or "?"
+        out["models"][name] = out["models"].get(name, 0) + tokens
+        pr = price_for(model, prices)
+        if not pr:
+            if tokens:
+                out["unknown_tokens"] += tokens
+                if name not in out["unknown_models"]:
+                    out["unknown_models"].append(name)
+            continue
+        mi = LONG_CONTEXT_INPUT_MULT if (is_long and pr.get("long_context", True)) else 1.0
+        mo = LONG_CONTEXT_OUTPUT_MULT if (is_long and pr.get("long_context", True)) else 1.0
+        cached = b["cached_input_tokens"]
+        cw = b["cache_write_input_tokens"]
+        uncached = max(0, b["input_tokens"] - cached - cw)
+        cw_rate = pr["input"] if pr.get("cache_write") is None else pr["cache_write"]
+        # output_tokens already includes reasoning_output_tokens (billed as output once).
+        inp = (uncached * pr["input"] + cw * cw_rate) * mi / 1e6
+        cac = cached * pr["cached_input"] * mi / 1e6
+        outp = b["output_tokens"] * pr["output"] * mo / 1e6
+        out["input"] += inp
+        out["cached"] += cac
+        out["output"] += outp
+    out["total"] = out["input"] + out["cached"] + out["output"]
+    out["priced"] = not out["unknown_models"]
+    return out
+
+
+def _fmt_usd(v) -> str:
+    if v is None:
+        return "—"
+    if 0 < v < 0.01:
+        return "<$0.01"
+    if v >= 1000:
+        return f"${v:,.0f}"
+    return f"${v:,.2f}"
 
 
 def _focus_existing_hwnd(hwnd: int) -> bool:
@@ -1077,6 +1300,7 @@ class Hud(tk.Tk):
         self._next_due = time.monotonic()
         self._task_reader = TaskUsageReader()
         self._task_reader.follow_selected = bool(self._cfg.get("task_follow_selected", True))
+        self._prices = merged_model_prices(self._cfg)
         self._task = None  # latest TaskUsageReader snapshot
         self._task_polling = False
         self._mini_tokens = None  # capsule task text: None = hidden, "—" = no data
@@ -1261,7 +1485,7 @@ class Hud(tk.Tk):
         wrap = card["wrap"]
         # Extra lines sit between the headline detail and the context meter.
         lines = []
-        for _ in range(3):
+        for _ in range(4):
             lab = tk.Label(wrap, text="", fg=TEXT, bg=PANEL, font=self._font_mono, anchor="w")
             lines.append(lab)
         card["lines"] = lines
@@ -1374,7 +1598,7 @@ class Hud(tk.Tk):
         if not title:
             sid = snap.get("id") or "?"
             title = f"#{sid[-8:]}"
-        limit = 24 if any(ord(ch) > 0x2E7F for ch in title) else 38
+        limit = 20 if any(ord(ch) > 0x2E7F for ch in title) else 30
         if len(title) > limit:
             title = title[: limit - 1] + "…"
         started = snap.get("started")
@@ -1383,7 +1607,7 @@ class Hud(tk.Tk):
             stamp = started.strftime(fmt)
         else:
             stamp = "--"
-        return self.t("task_title_line", title=title, started=stamp)
+        return self.t("task_title_line", title=title, started=stamp, model=snap.get("model") or "").rstrip()
 
     def _paint_task(self):
         if not hasattr(self, "task_card"):
@@ -1391,7 +1615,7 @@ class Hud(tk.Tk):
         with self._lock:
             snap = self._task
         card = self.task_card
-        view = task_view(snap)
+        view = task_view(snap, self._prices)
         compact = self.is_compact()
         font = self._label_font()
         if not view:
@@ -1415,7 +1639,13 @@ class Hud(tk.Tk):
             win_txt = _fmt_tokens(view["window"]) if view["window"] else "--"
             if compact:
                 card["detail"].configure(
-                    text=self.t("task_compact_line", total=_fmt_tokens(view["total"]), ctx=ctx_txt, window=win_txt),
+                    text=self.t(
+                        "task_compact_line",
+                        total=_fmt_tokens(view["total"]),
+                        ctx=ctx_txt,
+                        window=win_txt,
+                        cost=self._cost_total_text(view.get("cost")),
+                    ),
                     fg=TEXT,
                     font=font,
                 )
@@ -1439,7 +1669,8 @@ class Hud(tk.Tk):
                     ),
                     font=font,
                 )
-                card["lines"][2].configure(
+                card["lines"][2].configure(text=self._cost_line_text(view.get("cost")), font=font)
+                card["lines"][3].configure(
                     text=self.t("task_ctx_line", ctx=ctx_txt, window=win_txt, age=self._task_age_text(snap)),
                     font=font,
                 )
@@ -1454,6 +1685,26 @@ class Hud(tk.Tk):
             if self.is_mini():
                 self._redraw_capsule()
 
+    @staticmethod
+    def _cost_total_text(cost: dict | None) -> str:
+        if not cost or (not cost.get("priced") and cost.get("total", 0) <= 0):
+            return "—"
+        txt = _fmt_usd(cost["total"])
+        return txt if cost.get("priced") else txt + "+?"
+
+    def _cost_line_text(self, cost: dict | None) -> str:
+        if not cost:
+            return self.t("task_cost_na")
+        if not cost.get("priced") and cost.get("total", 0) <= 0:
+            return self.t("task_cost_unknown", models=", ".join(cost.get("unknown_models") or ["?"]))
+        return self.t(
+            "task_cost_line",
+            total=self._cost_total_text(cost),
+            inp=_fmt_usd(cost["input"]),
+            cached=_fmt_usd(cost["cached"]),
+            out=_fmt_usd(cost["output"]),
+        )
+
     def _tick_task_age(self):
         """Cheap per-pulse refresh of the 'updated N ago' text."""
         if self.is_compact() or self.is_mini() or not hasattr(self, "task_card"):
@@ -1463,7 +1714,7 @@ class Hud(tk.Tk):
         view = task_view(snap)
         if not view:
             return
-        self.task_card["lines"][2].configure(
+        self.task_card["lines"][3].configure(
             text=self.t(
                 "task_ctx_line",
                 ctx=_fmt_tokens(view["ctx"]),

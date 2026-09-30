@@ -30,8 +30,8 @@ pythonw codex_usage_hud.py
 
 | 模式 | 内容 |
 | --- | --- |
-| 详细 `detail` | 账号 / 套餐、5H / 7D 进度条、当前任务 token、credits、刷新间隔、置顶、同步、打开用量页 |
-| 简洁 `compact` | 5H / 7D 额度、当前任务总 token 和上下文占比、同步按钮 |
+| 详细 `detail` | 账号 / 套餐、5H / 7D 进度条、当前任务 token 与 API 估价、credits、刷新间隔、置顶、同步、打开用量页 |
+| 简洁 `compact` | 5H / 7D 额度、当前任务总 token、上下文占比和 API 估价、同步按钮 |
 | 迷你 `mini` | 胶囊条：5H / 7D 百分比 + 当前任务总 token + 展开 |
 
 详细面板用 COMPACT / 简洁 切布局，简洁面板用 DETAIL / 详细切回来。切换会按内容改窗口大小。
@@ -44,9 +44,10 @@ pythonw codex_usage_hud.py
 
 5H / 7D 下面多一张「当前任务 // 本地会话」卡片：
 
-- 任务名 + 开始时间（任务名取自 `~/.codex/session_index.jsonl`；没有时显示会话 id 末 8 位）
+- 任务名 + 开始时间 + 当前模型（任务名取自 `~/.codex/session_index.jsonl`；没有时显示会话 id 末 8 位）
 - 总计 / 输入 / 输出 token
 - 缓存命中：已缓存的输入 token 和占比，以及推理 token
+- API 估价：按 OpenAI API 标价折算的美元金额，以及输入 / 缓存 / 输出三部分（见下文）
 - 上下文：最近一轮的输入 token ÷ 模型上下文窗口，进度条颜色规则同上
 - 距离 Codex 上一次写入 token 统计过了多久
 
@@ -61,6 +62,35 @@ pythonw codex_usage_hud.py
 
 rollout 里取最后一条 `token_count` 事件。大文件只从尾部往回读，之后只读新增的字节；日志文件同理。读取都在后台线程，不卡界面。Windows 在文件被占用期间经常不更新修改时间和目录里的大小，所以会直接 `stat` 文件、并参考文件末尾那条记录的时间戳。
 
+### API 估价（美元）
+
+**只是估算。** Plus / Pro 等 ChatGPT 订阅用 Codex 不按 token 扣钱，这里的金额表示“同样的 token 如果走 OpenAI API 标准价大概要多少钱”，方便比较任务轻重。
+
+算法：
+
+- 模型取 rollout 里 `turn_context` 行的 `model`。任务中途换模型时，每条 `token_count` 相对上一条的 `total_token_usage` 增量记到当时生效的模型上（增量和 `last_token_usage` 一致；重复上报的同一条不会重复计）。
+- 未缓存输入 = `input_tokens - cached_input_tokens - cache_write_input_tokens`，按输入价；`cached_input_tokens` 按缓存价；`cache_write_input_tokens` 按缓存写入价（该模型没公布写入价时按输入价）；`output_tokens` 按输出价。`reasoning_output_tokens` 已经包含在 `output_tokens` 里，不重复计。
+- 单次请求输入超过 272K token 时按官方规则计 2 倍输入 / 缓存价、1.5 倍输出价（Codex 的上下文窗口约 258K，一般碰不到）。
+- 推理强度（effort）不单独计价，只体现在 token 数量上。
+- 标准档（Standard）价格；不含 Batch / Flex 折扣、Fast 模式加价、区域处理 10% 加价、工具调用费。
+- 没有官方 API 价格的模型不估算：显示 `—`，部分未知时总价后面加 `+?`。例如 `codex-auto-review`（Codex 内部自动审查用的代号）和自定义 provider 的模型。
+
+内置价格（美元 / 每 100 万 token，标准档短上下文），来源 [developers.openai.com/api/docs/pricing](https://developers.openai.com/api/docs/pricing) 和各模型页 `developers.openai.com/api/docs/models/<模型>`，2026-09-30 核对：
+
+| 模型 | 输入 | 缓存输入 | 缓存写入 | 输出 |
+| --- | --- | --- | --- | --- |
+| gpt-6.1-sol | 2.00 | 0.10 | 2.50 | 10.00 |
+| gpt-6-astra | 10.00 | 1.00 | 12.50 | 50.00 |
+| gpt-6-luna | 0.10 | 0.01 | 0.125 | 0.50 |
+| gpt-5.6-sol | 4.00 | 0.40 | 5.00 | 20.00 |
+| gpt-5.6-terra | 2.00 | 0.20 | 2.50 | 12.00 |
+| gpt-5.6-luna | 0.20 | 0.02 | 0.25 | 1.20 |
+| gpt-5.5 | 5.00 | 0.50 | （按输入价） | 30.00 |
+| gpt-5.4 | 2.50 | 0.25 | （按输入价） | 15.00 |
+| gpt-5.4-mini | 0.75 | 0.075 | （按输入价） | 4.50 |
+
+gpt-5.6-sol 是官方标注的促销价（至少到 2026-11-21）。价格会变，以官网为准；可以在配置里用 `model_prices` 覆盖或补充。
+
 ## 配置
 
 文件：`%USERPROFILE%\.codex_usage_hud.json`
@@ -73,7 +103,10 @@ rollout 里取最后一条 `token_count` 事件。大文件只从尾部往回读
   "lang": "en",
   "local_refresh_sec": 4,
   "mini_task_tokens": true,
-  "task_follow_selected": true
+  "task_follow_selected": true,
+  "model_prices": {
+    "codex-auto-review": { "input": 0.20, "cached_input": 0.02, "output": 1.20 }
+  }
 }
 ```
 
@@ -85,6 +118,7 @@ rollout 里取最后一条 `token_count` 事件。大文件只从尾部往回读
 - `local_refresh_sec`：本地任务 token 的读取间隔，1–60 秒，默认 4，和联网同步互不影响
 - `mini_task_tokens`：迷你胶囊是否显示当前任务总 token，默认 `true`（旧键名 `mini_task_ctx` 仍然认，保存配置时会改写成新键名）
 - `task_follow_selected`：当前任务是否跟随桌面端选中的对话，默认 `true`；设为 `false` 则只看最近写入的 rollout
+- `model_prices`：可选，覆盖或补充模型价格（美元 / 每 100 万 token）。每个模型写 `input`、`output`，可选 `cached_input`（默认同输入价）、`cache_write`（默认按输入价）、`long_context`（默认 `true`，是否套用 >272K 加价）。上面的 `codex-auto-review` 只是写法示例，不是官方价格
 
 登录文件 `~/.codex/auth.json` 不要放进仓库。
 
