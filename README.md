@@ -2,7 +2,7 @@
 
 Windows 桌面小窗，用来盯 Codex / ChatGPT 的 **5 小时** 和 **7 天** 额度。数字和 `codex /status`、chatgpt.com 用量页同一套接口。
 
-另外会读本机 Codex 会话记录，显示**当前任务**（最近活跃的那个对话）用了多少 token、上下文占了多少。这部分纯本地，不联网。
+另外会读本机 Codex 会话记录，显示**当前任务**（Codex 桌面端里正打开的那个对话）用了多少 token、上下文占了多少。这部分纯本地，不联网。
 
 不爬浏览器，也不读 ChatGPT 桌面端。登录态来自本机 Codex CLI 的 `~/.codex/auth.json`。
 
@@ -52,7 +52,14 @@ pythonw codex_usage_hud.py
 
 数字格式如 `2.78M`、`19.4K`。简洁模式只显示总计和上下文；迷你胶囊多一个上下文百分比（可用 `mini_task_ctx` 关掉）。
 
-“当前任务”= `~/.codex/sessions/YYYY/MM/DD/` 下最近有写入的 `rollout-*.jsonl`。取其中最后一条 `token_count` 事件。大文件只从尾部往回读，之后只读新增的字节，读取在后台线程，不卡界面。Windows 在 Codex 打开文件期间经常不更新修改时间，所以判断“最近活跃”时会同时看文件末尾那条记录的时间戳。
+“当前任务”怎么定：
+
+1. **跟随桌面端选中的任务**：读 Codex 桌面端日志 `%LOCALAPPDATA%\Codex\Logs\YYYY\MM\DD\codex-desktop-*.log`，找最近一次切换对话留下的记录（`ownerRoutePath=/local/<任务 id>`，以及 `thread_stream_view_activity_changed active=true conversationId=<任务 id>`），再按 id 找到 `~/.codex/sessions/**/rollout-*-<任务 id>.jsonl`。在桌面端点到别的任务，下一次本地刷新（默认 4 秒内）就会切过去，只是查看、没发消息也行。
+2. **兜底：最近写入的任务**：日志里找不到、当前页面不是某个任务（比如新对话页），或者这个任务还没有 rollout 文件时，用 `~/.codex/sessions/` 下最近有写入的 `rollout-*.jsonl`。
+
+选中的任务如果还没有 `token_count`，卡片只显示任务名和“暂无 token 数据”，不会沿用上一个任务的数字。
+
+rollout 里取最后一条 `token_count` 事件。大文件只从尾部往回读，之后只读新增的字节；日志文件同理。读取都在后台线程，不卡界面。Windows 在文件被占用期间经常不更新修改时间和目录里的大小，所以会直接 `stat` 文件、并参考文件末尾那条记录的时间戳。
 
 ## 配置
 
@@ -65,7 +72,8 @@ pythonw codex_usage_hud.py
   "mode": "detail",
   "lang": "en",
   "local_refresh_sec": 4,
-  "mini_task_ctx": true
+  "mini_task_ctx": true,
+  "task_follow_selected": true
 }
 ```
 
@@ -76,6 +84,7 @@ pythonw codex_usage_hud.py
 - `lang`：`en`（默认）或 `zh`
 - `local_refresh_sec`：本地任务 token 的读取间隔，1–60 秒，默认 4，和联网同步互不影响
 - `mini_task_ctx`：迷你胶囊是否显示当前任务上下文百分比，默认 `true`
+- `task_follow_selected`：当前任务是否跟随桌面端选中的对话，默认 `true`；设为 `false` 则只看最近写入的 rollout
 
 登录文件 `~/.codex/auth.json` 不要放进仓库。
 
@@ -91,6 +100,7 @@ Codex 要两边都有剩余额度才能继续用：5h 和 7d 任一打满都会�
 
 - `~/.codex/sessions/**/rollout-*.jsonl` 里 `type=event_msg`、`payload.type=token_count` 的行（`info.total_token_usage`、`info.last_token_usage`、`info.model_context_window`）
 - `~/.codex/session_index.jsonl` 里的 `thread_name`
+- `%LOCALAPPDATA%\Codex\Logs\` 下桌面端日志里的对话切换记录（只读，用来判断当前选中的任务）
 
 ## 文件
 

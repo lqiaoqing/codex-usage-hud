@@ -30,6 +30,8 @@ CONFIG_PATH = Path.home() / ".codex_usage_hud.json"
 HWND_PATH = Path.home() / ".codex_usage_hud.hwnd"
 SESSIONS_DIR = CODEX_HOME / "sessions"
 SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
+ARCHIVED_SESSIONS_DIR = CODEX_HOME / "archived_sessions"
+CODEX_LOGS_DIR = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Codex" / "Logs"
 SINGLETON_MUTEX = "Local\\CodexUsageHud.SingleInstance"
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_PAGE = "https://chatgpt.com/codex/settings/usage"
@@ -57,6 +59,9 @@ ROLLOUT_RESCAN_SEC = 20  # re-list sessions dir for newly created tasks
 ROLLOUT_CANDIDATES = 6  # newest-by-mtime + newest-by-name rollouts to watch
 ROLLOUT_TAIL_CHUNK = 256 * 1024
 ROLLOUT_TAIL_LIMIT = 32 * 1024 * 1024  # max bytes scanned backwards per task switch
+ROLLOUT_ID_RESCAN_SEC = 3  # min gap between full rescans when a selected id has no rollout yet
+LOG_DAY_DIRS = 2  # newest Codex desktop log day folders to watch
+LOG_TAIL_LIMIT = 16 * 1024 * 1024  # max bytes scanned backwards per log file on first sight
 
 STRINGS = {
     "en": {
@@ -105,7 +110,7 @@ STRINGS = {
         "task_card": "TASK  //  CURRENT SESSION",
         "task_card_compact": "TASK",
         "task_none": "no local Codex session found",
-        "task_wait": "awaiting token_count",
+        "task_wait": "no token data yet",
         "task_title_line": "{title}   @{started}",
         "task_tokens_line": "TOTAL {total}   IN {inp}   OUT {out}",
         "task_cache_line": "CACHED {cached} ({hit:.1f}%)   REASONING {reasoning}",
@@ -159,7 +164,7 @@ STRINGS = {
         "task_card": "当前任务  //  本地会话",
         "task_card_compact": "任务",
         "task_none": "未找到本地 Codex 会话",
-        "task_wait": "等待 token 统计",
+        "task_wait": "暂无 token 数据",
         "task_title_line": "{title}   @{started}",
         "task_tokens_line": "总计 {total}   输入 {inp}   输出 {out}",
         "task_cache_line": "缓存 {cached}（命中 {hit:.1f}%）   推理 {reasoning}",
@@ -208,6 +213,7 @@ def load_ui_config() -> dict:
         local_sec = DEFAULT_LOCAL_REFRESH_SEC
     data["local_refresh_sec"] = max(MIN_LOCAL_REFRESH_SEC, min(MAX_LOCAL_REFRESH_SEC, local_sec))
     data["mini_task_ctx"] = bool(data.get("mini_task_ctx", True))
+    data["task_follow_selected"] = bool(data.get("task_follow_selected", True))
     data.setdefault("topmost", True)
     mode = str(data.get("mode") or "detail").lower()
     if mode not in ("detail", "compact", "mini"):
@@ -451,8 +457,184 @@ def _parse_token_line(raw: bytes) -> dict | None:
     }
 
 
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_LOG_ROUTE_RE = re.compile(rb"ownerRoutePath=(\S*)")
+_LOG_VIEW_RE = re.compile(rb"thread_stream_view_activity_changed active=true conversationId=(\S+)")
+
+
+def _parse_selection_line(raw: bytes) -> tuple[str, str | None] | None:
+    """Return (iso_ts, thread_id | None) for a Codex desktop UI navigation log line.
+
+    - "IAB_LIFECYCLE received browser sidebar owner sync ... ownerRoutePath=/local/<id>"
+      is logged every time a thread is opened in the main window. A route without a
+      thread id (new chat, settings, ...) yields None, i.e. "no task selected".
+    - "thread_stream_view_activity_changed active=true conversationId=<id>" (primary
+      window) is logged when a thread view becomes active; kept as a second signal.
+    """
+    if b"ownerRoutePath=" in raw:
+        m = _LOG_ROUTE_RE.search(raw)
+        if not m:
+            return None
+        route = m.group(1).decode("utf-8", "replace")
+        ids = _UUID_RE.findall(route)
+        tid = ids[-1].lower() if ids and "client-new-thread" not in route else None
+    elif b"thread_stream_view_activity_changed active=true" in raw:
+        if b"rendererWindowAppearance=primary" not in raw:
+            return None
+        m = _LOG_VIEW_RE.search(raw)
+        if not m:
+            return None
+        conv = m.group(1).decode("utf-8", "replace")
+        ids = _UUID_RE.findall(conv)
+        if not ids or "client-new-thread" in conv:
+            return None
+        tid = ids[0].lower()
+    else:
+        return None
+    ts = raw[:40].split(b" ", 1)[0].decode("ascii", "replace")
+    if not ts[:4].isdigit():
+        return None
+    return ts, tid
+
+
+class SelectedThreadTracker:
+    """Which thread is open in the Codex desktop app, from its log files.
+
+    Read-only and incremental: each log file is scanned backwards once (newest
+    files first, stopping as soon as older files cannot hold a newer event), then
+    only appended bytes are parsed on later polls. NTFS directory listings report
+    stale sizes/mtimes for files Codex keeps open, so sizes come from os.stat().
+    """
+
+    def __init__(self, logs_dir: Path = CODEX_LOGS_DIR):
+        self.logs_dir = Path(logs_dir)
+        self._files: dict[str, dict] = {}  # path -> {"offset": int, "event": (ts, id) | None}
+        self._primed = False
+
+    def _day_dirs(self) -> list[str]:
+        out = []
+
+        def _sub(path: str) -> list[str]:
+            try:
+                return sorted(
+                    (e.path for e in os.scandir(path) if e.is_dir() and e.name.isdigit()), reverse=True
+                )
+            except OSError:
+                return []
+
+        for y in _sub(str(self.logs_dir)):
+            for m in _sub(y):
+                for d in _sub(m):
+                    out.append(d)
+                    if len(out) >= LOG_DAY_DIRS:
+                        return out
+        return out
+
+    def _log_files(self) -> list[str]:
+        files = []
+        for d in self._day_dirs():
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        if e.name.startswith("codex-desktop-") and e.name.endswith(".log"):
+                            files.append(e.path)
+            except OSError:
+                continue
+        return files
+
+    @staticmethod
+    def _last_ts(path: str, size: int) -> str:
+        try:
+            with open(path, "rb") as fh:
+                start = max(0, size - 8192)
+                fh.seek(start)
+                chunk = fh.read(size - start)
+        except OSError:
+            return ""
+        for raw in reversed(chunk.split(b"\n")):
+            ts = raw[:40].split(b" ", 1)[0]
+            if ts[:4].isdigit() and ts.endswith(b"Z"):
+                return ts.decode("ascii", "replace")
+        return ""
+
+    @staticmethod
+    def _scan_backwards(path: str, end: int):
+        try:
+            fh = open(path, "rb")
+        except OSError:
+            return None
+        with fh:
+            pos, carry = end, b""
+            while pos > 0 and end - pos < LOG_TAIL_LIMIT:
+                n = min(ROLLOUT_TAIL_CHUNK, pos)
+                pos -= n
+                fh.seek(pos)
+                lines = (fh.read(n) + carry).split(b"\n")
+                carry = lines[0] if pos > 0 else b""
+                for raw in reversed(lines[1:] if pos > 0 else lines):
+                    ev = _parse_selection_line(raw)
+                    if ev:
+                        return ev
+        return None
+
+    def _read_forward(self, path: str, st: dict, size: int):
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(st["offset"])
+                data = fh.read(size - st["offset"])
+        except OSError:
+            return
+        cut = data.rfind(b"\n")
+        if cut < 0:
+            return
+        st["offset"] += cut + 1
+        for raw in data[:cut].split(b"\n"):
+            ev = _parse_selection_line(raw)
+            if ev and (st["event"] is None or ev[0] >= st["event"][0]):
+                st["event"] = ev
+
+    def poll(self) -> tuple[str, str | None] | None:
+        """Return (iso_ts, thread_id | None) of the newest UI navigation, or None if unknown."""
+        paths = self._log_files()
+        sizes = {}
+        for p in paths:
+            try:
+                sizes[p] = os.stat(p).st_size
+            except OSError:
+                continue
+        for p in list(self._files):
+            if p not in sizes:
+                self._files.pop(p, None)
+        if not self._primed:
+            # First pass: newest files first; stop once no older file can beat the best event.
+            order = sorted(sizes, key=lambda p: self._last_ts(p, sizes[p]), reverse=True)
+            best = None
+            for p in order:
+                last = self._last_ts(p, sizes[p])
+                if best is not None and last and last < best[0]:
+                    self._files[p] = {"offset": sizes[p], "event": None}
+                    continue
+                ev = self._scan_backwards(p, sizes[p])
+                self._files[p] = {"offset": sizes[p], "event": ev}
+                if ev and (best is None or ev[0] > best[0]):
+                    best = ev
+            self._primed = True
+        else:
+            for p, size in sizes.items():
+                st = self._files.get(p)
+                if st is None:
+                    st = self._files[p] = {"offset": 0, "event": None}  # new / rotated log
+                if size < st["offset"]:
+                    st["offset"] = 0
+                if size > st["offset"]:
+                    self._read_forward(p, st, size)
+        events = [st["event"] for st in self._files.values() if st.get("event")]
+        return max(events, key=lambda e: e[0]) if events else None
+
+
 class TaskUsageReader:
-    """Follow the most recently active Codex rollout and extract its token usage.
+    """Follow the Codex task open in the desktop UI (else the most recently
+    active rollout) and extract its token usage.
 
     Pure local file reads, meant to run on a worker thread. The active file is
     tailed incrementally (only bytes appended since the last poll are parsed);
@@ -461,9 +643,22 @@ class TaskUsageReader:
     activity = max(mtime, timestamp of the last line in the file tail).
     """
 
-    def __init__(self, sessions_dir: Path = SESSIONS_DIR, index_path: Path = SESSION_INDEX_PATH):
+    def __init__(
+        self,
+        sessions_dir: Path = SESSIONS_DIR,
+        index_path: Path = SESSION_INDEX_PATH,
+        logs_dir: Path | None = CODEX_LOGS_DIR,
+        archived_dir: Path | None = ARCHIVED_SESSIONS_DIR,
+    ):
         self.sessions_dir = Path(sessions_dir)
         self.index_path = Path(index_path)
+        self.archived_dir = Path(archived_dir) if archived_dir else None
+        self.selector = SelectedThreadTracker(logs_dir) if logs_dir else None
+        self.follow_selected = True
+        self._by_id: dict[str, str] = {}  # thread id -> rollout path
+        self._id_scan_at = 0.0
+        self._selection = None  # last (iso_ts, id | None) from the desktop log
+        self._source = "latest"
         self._candidates: list[str] = []
         self._scan_at = 0.0
         self._stat: dict[str, tuple[int, float, float]] = {}  # path -> (size, mtime, activity)
@@ -476,9 +671,9 @@ class TaskUsageReader:
         self._titles_sig = None
 
     # -- discovery -------------------------------------------------------
-    def _list_rollouts(self) -> list[tuple[str, float]]:
+    def _list_rollouts(self, root: Path | None = None) -> list[tuple[str, float]]:
         out = []
-        stack = [str(self.sessions_dir)]
+        stack = [str(root or self.sessions_dir)]
         while stack:
             cur = stack.pop()
             try:
@@ -497,6 +692,13 @@ class TaskUsageReader:
 
     def _rescan(self):
         files = self._list_rollouts()
+        by_id = {}
+        extra = self._list_rollouts(self.archived_dir) if self.archived_dir else []
+        for p, _ in extra + files:  # live sessions win over archived copies
+            m = _ROLLOUT_RE.search(os.path.basename(p))
+            if m:
+                by_id[m.group(2).lower()] = p
+        self._by_id = by_id
         by_mtime = [p for p, _ in sorted(files, key=lambda x: x[1], reverse=True)[:ROLLOUT_CANDIDATES]]
         by_name = [p for p, _ in sorted(files, key=lambda x: os.path.basename(x[0]), reverse=True)[:ROLLOUT_CANDIDATES]]
         seen = []
@@ -622,10 +824,37 @@ class TaskUsageReader:
             self._titles_sig = sig
         return self._titles.get(sid)
 
+    def _rollout_for_id(self, tid: str) -> str | None:
+        path = self._by_id.get(tid)
+        if path and os.path.exists(path):
+            return path
+        # New thread (rollout created after the last rescan) or moved file: rescan, rate-limited.
+        if time.monotonic() - self._id_scan_at >= ROLLOUT_ID_RESCAN_SEC:
+            self._id_scan_at = time.monotonic()
+            self._rescan()
+            path = self._by_id.get(tid)
+            if path and os.path.exists(path):
+                return path
+        return None
+
     def poll(self) -> dict | None:
         if not self._candidates or time.monotonic() - self._scan_at >= ROLLOUT_RESCAN_SEC:
             self._rescan()
-        path = self._pick_active()
+        path = None
+        self._source = "latest"
+        self._selection = None
+        if self.follow_selected and self.selector is not None:
+            try:
+                self._selection = self.selector.poll()
+            except Exception:
+                self._selection = None
+            tid = (self._selection or (None, None))[1]
+            if tid:
+                path = self._rollout_for_id(tid)
+                if path:
+                    self._source = "selected"
+        if not path:
+            path = self._pick_active()
         if not path:
             self._path = None
             return None
@@ -689,6 +918,9 @@ class TaskUsageReader:
             "window": info.get("model_context_window"),
             "updated_ts": self._last_event_ts or (self._usage or {}).get("ts"),
             "rate_limits": self._rate_limits,
+            "source": self._source,  # "selected" (open in Codex UI) or "latest" (last written)
+            "selected_id": (self._selection or (None, None))[1],
+            "selected_at": (self._selection or (None, None))[0],
         }
 
 
@@ -842,6 +1074,7 @@ class Hud(tk.Tk):
         self._tick = 0
         self._next_due = time.monotonic()
         self._task_reader = TaskUsageReader()
+        self._task_reader.follow_selected = bool(self._cfg.get("task_follow_selected", True))
         self._task = None  # latest TaskUsageReader snapshot
         self._task_polling = False
         self._mini_ctx = None
