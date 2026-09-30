@@ -4,6 +4,8 @@ from __future__ import annotations
 import ctypes
 import json
 import math
+import os
+import re
 import threading
 import time
 import urllib.error
@@ -26,6 +28,8 @@ CODEX_HOME = Path.home() / ".codex"
 AUTH_PATH = CODEX_HOME / "auth.json"
 CONFIG_PATH = Path.home() / ".codex_usage_hud.json"
 HWND_PATH = Path.home() / ".codex_usage_hud.hwnd"
+SESSIONS_DIR = CODEX_HOME / "sessions"
+SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
 SINGLETON_MUTEX = "Local\\CodexUsageHud.SingleInstance"
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_PAGE = "https://chatgpt.com/codex/settings/usage"
@@ -46,6 +50,13 @@ CHROMA = "#ff00ff"  # mini capsule transparency key (Windows)
 DEFAULT_REFRESH_SEC = 60
 MIN_REFRESH_SEC = 5
 MAX_REFRESH_SEC = 3600
+DEFAULT_LOCAL_REFRESH_SEC = 4
+MIN_LOCAL_REFRESH_SEC = 1
+MAX_LOCAL_REFRESH_SEC = 60
+ROLLOUT_RESCAN_SEC = 20  # re-list sessions dir for newly created tasks
+ROLLOUT_CANDIDATES = 6  # newest-by-mtime + newest-by-name rollouts to watch
+ROLLOUT_TAIL_CHUNK = 256 * 1024
+ROLLOUT_TAIL_LIMIT = 32 * 1024 * 1024  # max bytes scanned backwards per task switch
 
 STRINGS = {
     "en": {
@@ -91,6 +102,16 @@ STRINGS = {
         "err_refresh": "refresh failed: {err}",
         "err_http": "HTTP {code}: {detail}",
         "err_request": "request failed: {err}",
+        "task_card": "TASK  //  CURRENT SESSION",
+        "task_card_compact": "TASK",
+        "task_none": "no local Codex session found",
+        "task_wait": "awaiting token_count",
+        "task_title_line": "{title}   @{started}",
+        "task_tokens_line": "TOTAL {total}   IN {inp}   OUT {out}",
+        "task_cache_line": "CACHED {cached} ({hit:.1f}%)   REASONING {reasoning}",
+        "task_ctx_line": "CTX {ctx} / {window}   UPDATED {age} AGO",
+        "task_compact_line": "TOTAL {total}   CTX {ctx} / {window}",
+        "mini_ctx": "CTX",
     },
     "zh": {
         "window_title": "CODEX // 用量",
@@ -135,6 +156,16 @@ STRINGS = {
         "err_refresh": "刷新令牌失败：{err}",
         "err_http": "HTTP {code}: {detail}",
         "err_request": "请求失败：{err}",
+        "task_card": "当前任务  //  本地会话",
+        "task_card_compact": "任务",
+        "task_none": "未找到本地 Codex 会话",
+        "task_wait": "等待 token 统计",
+        "task_title_line": "{title}   @{started}",
+        "task_tokens_line": "总计 {total}   输入 {inp}   输出 {out}",
+        "task_cache_line": "缓存 {cached}（命中 {hit:.1f}%）   推理 {reasoning}",
+        "task_ctx_line": "上下文 {ctx} / {window}   {age}前更新",
+        "task_compact_line": "总计 {total}   上下文 {ctx} / {window}",
+        "mini_ctx": "上下文",
     },
 }
 
@@ -170,6 +201,13 @@ def load_ui_config() -> dict:
     except Exception:
         sec = DEFAULT_REFRESH_SEC
     data["refresh_sec"] = max(MIN_REFRESH_SEC, min(MAX_REFRESH_SEC, sec))
+    local_sec = data.get("local_refresh_sec", DEFAULT_LOCAL_REFRESH_SEC)
+    try:
+        local_sec = int(local_sec)
+    except Exception:
+        local_sec = DEFAULT_LOCAL_REFRESH_SEC
+    data["local_refresh_sec"] = max(MIN_LOCAL_REFRESH_SEC, min(MAX_LOCAL_REFRESH_SEC, local_sec))
+    data["mini_task_ctx"] = bool(data.get("mini_task_ctx", True))
     data.setdefault("topmost", True)
     mode = str(data.get("mode") or "detail").lower()
     if mode not in ("detail", "compact", "mini"):
@@ -333,6 +371,356 @@ def summarize(data: dict) -> dict:
     }
 
 
+def _fmt_tokens(n) -> str:
+    try:
+        n = float(n)
+    except Exception:
+        return "--"
+    a = abs(n)
+    if a >= 1e9:
+        return f"{n / 1e9:.2f}B"
+    if a >= 1e6:
+        return f"{n / 1e6:.2f}M"
+    if a >= 1e3:
+        return f"{n / 1e3:.1f}K"
+    return f"{int(n)}"
+
+
+def _fmt_age(seconds: int | float | None, lang: str = "en") -> str:
+    if seconds is None:
+        return "--"
+    try:
+        s = int(max(0, seconds))
+    except Exception:
+        return "--"
+    d, rem = divmod(s, 86400)
+    h, rem = divmod(rem, 3600)
+    m, sec = divmod(rem, 60)
+    if lang == "zh":
+        if d:
+            return f"{d}天{h:02d}小时"
+        if h:
+            return f"{h}小时{m:02d}分"
+        if m:
+            return f"{m}分{sec:02d}秒"
+        return f"{sec}秒"
+    if d:
+        return f"{d}d{h:02d}h"
+    if h:
+        return f"{h}h{m:02d}m"
+    if m:
+        return f"{m}m{sec:02d}s"
+    return f"{sec}s"
+
+
+_ROLLOUT_RE = re.compile(r"rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-([0-9a-fA-F-]{36})\.jsonl$")
+_TS_RE = re.compile(rb'\{"timestamp":"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)Z"')
+
+
+def _parse_iso_utc(text: str | None) -> float | None:
+    if not text:
+        return None
+    try:
+        t = str(text).rstrip("Z")
+        if "." in t:
+            head, frac = t.split(".", 1)
+            t = f"{head}.{frac[:6]}"
+        return datetime.fromisoformat(t).replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return None
+
+
+def _parse_token_line(raw: bytes) -> dict | None:
+    """Parse one rollout line; return {ts, info, rate_limits} for token_count events."""
+    if b'"token_count"' not in raw:
+        return None
+    try:
+        d = json.loads(raw.decode("utf-8", "replace"))
+    except Exception:
+        return None
+    if not isinstance(d, dict) or d.get("type") != "event_msg":
+        return None
+    pl = d.get("payload") or {}
+    if not isinstance(pl, dict) or pl.get("type") != "token_count":
+        return None
+    info = pl.get("info")
+    return {
+        "ts": _parse_iso_utc(d.get("timestamp")),
+        "info": info if isinstance(info, dict) else None,
+        "rate_limits": pl.get("rate_limits") if isinstance(pl.get("rate_limits"), dict) else None,
+    }
+
+
+class TaskUsageReader:
+    """Follow the most recently active Codex rollout and extract its token usage.
+
+    Pure local file reads, meant to run on a worker thread. The active file is
+    tailed incrementally (only bytes appended since the last poll are parsed);
+    on a task switch the file is scanned backwards from EOF in chunks.
+    NTFS often keeps a stale mtime while Codex holds the rollout open, so file
+    activity = max(mtime, timestamp of the last line in the file tail).
+    """
+
+    def __init__(self, sessions_dir: Path = SESSIONS_DIR, index_path: Path = SESSION_INDEX_PATH):
+        self.sessions_dir = Path(sessions_dir)
+        self.index_path = Path(index_path)
+        self._candidates: list[str] = []
+        self._scan_at = 0.0
+        self._stat: dict[str, tuple[int, float, float]] = {}  # path -> (size, mtime, activity)
+        self._path: str | None = None
+        self._offset = 0
+        self._usage: dict | None = None  # last token_count with info
+        self._last_event_ts: float | None = None
+        self._rate_limits: dict | None = None
+        self._titles: dict[str, str] = {}
+        self._titles_sig = None
+
+    # -- discovery -------------------------------------------------------
+    def _list_rollouts(self) -> list[tuple[str, float]]:
+        out = []
+        stack = [str(self.sessions_dir)]
+        while stack:
+            cur = stack.pop()
+            try:
+                with os.scandir(cur) as it:
+                    for e in it:
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append(e.path)
+                            elif e.name.startswith("rollout-") and e.name.endswith(".jsonl"):
+                                out.append((e.path, e.stat().st_mtime))
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return out
+
+    def _rescan(self):
+        files = self._list_rollouts()
+        by_mtime = [p for p, _ in sorted(files, key=lambda x: x[1], reverse=True)[:ROLLOUT_CANDIDATES]]
+        by_name = [p for p, _ in sorted(files, key=lambda x: os.path.basename(x[0]), reverse=True)[:ROLLOUT_CANDIDATES]]
+        seen = []
+        for p in by_mtime + by_name + ([self._path] if self._path else []):
+            if p and p not in seen:
+                seen.append(p)
+        self._candidates = seen
+        for p in list(self._stat):
+            if p not in seen:
+                self._stat.pop(p, None)
+        self._scan_at = time.monotonic()
+
+    @staticmethod
+    def _tail_timestamp(path: str, size: int) -> float | None:
+        try:
+            with open(path, "rb") as fh:
+                start = max(0, size - 65536)
+                fh.seek(start)
+                chunk = fh.read(size - start)
+        except OSError:
+            return None
+        last = None
+        for m in _TS_RE.finditer(chunk):
+            last = m
+        return _parse_iso_utc(last.group(1).decode()) if last else None
+
+    def _pick_active(self) -> str | None:
+        best, best_act = None, -1.0
+        for p in self._candidates:
+            try:
+                st = os.stat(p)
+            except OSError:
+                self._stat.pop(p, None)
+                continue
+            prev = self._stat.get(p)
+            if prev and prev[0] == st.st_size and prev[1] == st.st_mtime:
+                act = prev[2]
+            else:
+                ts = self._tail_timestamp(p, st.st_size)
+                act = max(st.st_mtime, ts or 0.0)
+                self._stat[p] = (st.st_size, st.st_mtime, act)
+            if act > best_act:
+                best, best_act = p, act
+        return best
+
+    # -- reading ---------------------------------------------------------
+    def _scan_backwards(self, path: str, end: int):
+        """Find the newest token_count (with info) scanning from EOF in chunks."""
+        self._usage = None
+        self._last_event_ts = None
+        self._rate_limits = None
+        try:
+            fh = open(path, "rb")
+        except OSError:
+            return
+        with fh:
+            pos = end
+            carry = b""
+            while pos > 0 and end - pos < ROLLOUT_TAIL_LIMIT:
+                n = min(ROLLOUT_TAIL_CHUNK, pos)
+                pos -= n
+                fh.seek(pos)
+                buf = fh.read(n) + carry
+                lines = buf.split(b"\n")
+                # lines[0] may be a partial line unless we reached BOF
+                carry = lines[0] if pos > 0 else b""
+                body = lines[1:] if pos > 0 else lines
+                for raw in reversed(body):
+                    ev = _parse_token_line(raw)
+                    if not ev:
+                        continue
+                    if self._last_event_ts is None:
+                        self._last_event_ts = ev["ts"]
+                    if self._rate_limits is None and ev["rate_limits"]:
+                        self._rate_limits = ev["rate_limits"]
+                    if ev["info"]:
+                        self._usage = ev
+                        return
+
+    def _read_forward(self, path: str, size: int):
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(self._offset)
+                data = fh.read(size - self._offset)
+        except OSError:
+            return
+        cut = data.rfind(b"\n")
+        if cut < 0:
+            return  # wait for the line to finish
+        self._offset += cut + 1
+        for raw in data[:cut].split(b"\n"):
+            ev = _parse_token_line(raw)
+            if not ev:
+                continue
+            self._last_event_ts = ev["ts"] or self._last_event_ts
+            if ev["rate_limits"]:
+                self._rate_limits = ev["rate_limits"]
+            if ev["info"]:
+                self._usage = ev
+
+    def _title_for(self, sid: str | None) -> str | None:
+        if not sid:
+            return None
+        try:
+            st = self.index_path.stat()
+            sig = (st.st_size, st.st_mtime)
+        except OSError:
+            return None
+        if sig != self._titles_sig or sid not in self._titles:
+            titles = {}
+            try:
+                with open(self.index_path, "rb") as fh:
+                    for raw in fh:
+                        try:
+                            d = json.loads(raw.decode("utf-8", "replace"))
+                        except Exception:
+                            continue
+                        if isinstance(d, dict) and d.get("id") and d.get("thread_name"):
+                            titles[str(d["id"])] = str(d["thread_name"])
+            except OSError:
+                return None
+            self._titles = titles
+            self._titles_sig = sig
+        return self._titles.get(sid)
+
+    def poll(self) -> dict | None:
+        if not self._candidates or time.monotonic() - self._scan_at >= ROLLOUT_RESCAN_SEC:
+            self._rescan()
+        path = self._pick_active()
+        if not path:
+            self._path = None
+            return None
+        try:
+            size = os.stat(path).st_size
+        except OSError:
+            return None
+        if path != self._path or size < self._offset:
+            self._path = path
+            self._scan_backwards(path, size)
+            # resume forward reads from the last complete line
+            self._offset = size
+            try:
+                with open(path, "rb") as fh:
+                    if size:
+                        fh.seek(size - 1)
+                        if fh.read(1) != b"\n":
+                            self._offset = self._line_start(fh, size)
+            except OSError:
+                pass
+        elif size > self._offset:
+            self._read_forward(path, size)
+        return self.snapshot()
+
+    @staticmethod
+    def _line_start(fh, size: int) -> int:
+        pos = size
+        while pos > 0:
+            n = min(65536, pos)
+            pos -= n
+            fh.seek(pos)
+            chunk = fh.read(n)
+            i = chunk.rfind(b"\n")
+            if i >= 0:
+                return pos + i + 1
+        return 0
+
+    def snapshot(self) -> dict | None:
+        if not self._path:
+            return None
+        name = os.path.basename(self._path)
+        m = _ROLLOUT_RE.search(name)
+        sid = m.group(2) if m else None
+        started = None
+        if m:
+            try:
+                started = datetime.strptime(m.group(1), "%Y-%m-%dT%H-%M-%S")
+            except Exception:
+                started = None
+        info = (self._usage or {}).get("info") or {}
+        total = info.get("total_token_usage") or {}
+        last = info.get("last_token_usage") or {}
+        return {
+            "path": self._path,
+            "id": sid,
+            "title": self._title_for(sid),
+            "started": started,
+            "has_usage": bool(total),
+            "total": total,
+            "last": last,
+            "window": info.get("model_context_window"),
+            "updated_ts": self._last_event_ts or (self._usage or {}).get("ts"),
+            "rate_limits": self._rate_limits,
+        }
+
+
+def task_view(snap: dict | None) -> dict | None:
+    """Derive display numbers from a TaskUsageReader snapshot."""
+    if not snap or not snap.get("has_usage"):
+        return None
+    total = snap.get("total") or {}
+    last = snap.get("last") or {}
+
+    def _i(d, k):
+        try:
+            return int(d.get(k) or 0)
+        except Exception:
+            return 0
+
+    inp = _i(total, "input_tokens")
+    cached = _i(total, "cached_input_tokens")
+    ctx = _i(last, "input_tokens") or _i(last, "total_tokens")
+    window = _i(snap, "window")
+    return {
+        "total": _i(total, "total_tokens") or inp + _i(total, "output_tokens"),
+        "input": inp,
+        "cached": cached,
+        "hit": (cached * 100.0 / inp) if inp else 0.0,
+        "output": _i(total, "output_tokens"),
+        "reasoning": _i(total, "reasoning_output_tokens"),
+        "ctx": ctx,
+        "window": window,
+        "ctx_pct": min(100.0, ctx * 100.0 / window) if window else 0.0,
+    }
+
 
 def _focus_existing_hwnd(hwnd: int) -> bool:
     user32 = ctypes.windll.user32
@@ -453,6 +841,10 @@ class Hud(tk.Tk):
         self._refreshing = False
         self._tick = 0
         self._next_due = time.monotonic()
+        self._task_reader = TaskUsageReader()
+        self._task = None  # latest TaskUsageReader snapshot
+        self._task_polling = False
+        self._mini_ctx = None
 
         self._font_title = tkfont.Font(family="Consolas", size=13, weight="bold")
         self._font_mono = tkfont.Font(family="Consolas", size=9)
@@ -465,6 +857,7 @@ class Hud(tk.Tk):
         self.after(200, self._publish_hwnd)
         self.after(120, self.refresh_now)
         threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._local_loop, daemon=True).start()
         self.after(250, self._pulse)
 
     def lang(self) -> str:
@@ -526,6 +919,7 @@ class Hud(tk.Tk):
 
         self.card5 = self._card(self.t("card5"))
         self.card7 = self._card(self.t("card7"))
+        self.task_card = self._task_card()
 
         extra = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
         self.extra_wrap = extra
@@ -627,6 +1021,19 @@ class Hud(tk.Tk):
         meter.pack(fill="x", padx=10, pady=(6, 10))
         return {"wrap": wrap, "title": title_l, "pct": pct, "detail": detail, "meter": meter}
 
+    def _task_card(self):
+        card = self._card(self.t("task_card"))
+        wrap = card["wrap"]
+        # Extra lines sit between the headline detail and the context meter.
+        lines = []
+        for _ in range(3):
+            lab = tk.Label(wrap, text="", fg=TEXT, bg=PANEL, font=self._font_mono, anchor="w")
+            lines.append(lab)
+        card["lines"] = lines
+        card["pct"].configure(text="--")
+        card["detail"].configure(text=self.t("task_wait"), fg=MUTED)
+        return card
+
     def current_refresh_sec(self) -> int:
         try:
             sec = int(str(self.refresh_var.get()).strip())
@@ -666,10 +1073,12 @@ class Hud(tk.Tk):
         self.mode_btn.configure(font=self._font_tiny)
         self.hdr_status.configure(font=self._font_tiny)
         self.meta.configure(font=self._label_font())
-        for card in (self.card5, self.card7):
+        for card in (self.card5, self.card7, self.task_card):
             card["title"].configure(font=self._tiny_label_font())
             card["pct"].configure(font=self._font_big)
             card["detail"].configure(font=self._label_font())
+        for lab in self.task_card["lines"]:
+            lab.configure(font=self._label_font())
         for lab, val in self.extra_rows:
             lab.configure(font=self._label_font(), width=12)
             val.configure(font=self._font_mono)
@@ -687,6 +1096,7 @@ class Hud(tk.Tk):
             self._paint()
         else:
             self.meta.configure(text=self.t("boot"))
+        self._paint_task()
 
     def _loop(self):
         while not self._stop.is_set():
@@ -698,6 +1108,135 @@ class Hud(tk.Tk):
                 self._next_due = now + max(MIN_REFRESH_SEC, self.current_refresh_sec())
             self._stop.wait(0.4)
 
+    def current_local_refresh_sec(self) -> int:
+        try:
+            sec = int(self._cfg.get("local_refresh_sec", DEFAULT_LOCAL_REFRESH_SEC))
+        except Exception:
+            sec = DEFAULT_LOCAL_REFRESH_SEC
+        return max(MIN_LOCAL_REFRESH_SEC, min(MAX_LOCAL_REFRESH_SEC, sec))
+
+    def _local_loop(self):
+        # Local rollout polling: independent of the online sync, never on the UI thread.
+        while not self._stop.is_set():
+            try:
+                snap = self._task_reader.poll()
+            except Exception:
+                snap = None
+            with self._lock:
+                self._task = snap
+            try:
+                self.after(0, self._paint_task)
+            except Exception:
+                return
+            self._stop.wait(self.current_local_refresh_sec())
+
+    def _task_age_text(self, snap: dict | None) -> str:
+        ts = (snap or {}).get("updated_ts")
+        return _fmt_age(time.time() - ts if ts else None, self.lang())
+
+    def _task_title_text(self, snap: dict) -> str:
+        title = (snap.get("title") or "").strip()
+        if not title:
+            sid = snap.get("id") or "?"
+            title = f"#{sid[-8:]}"
+        limit = 24 if any(ord(ch) > 0x2E7F for ch in title) else 38
+        if len(title) > limit:
+            title = title[: limit - 1] + "…"
+        started = snap.get("started")
+        if isinstance(started, datetime):
+            fmt = "%H:%M" if started.date() == datetime.now().date() else "%m-%d %H:%M"
+            stamp = started.strftime(fmt)
+        else:
+            stamp = "--"
+        return self.t("task_title_line", title=title, started=stamp)
+
+    def _paint_task(self):
+        if not hasattr(self, "task_card"):
+            return
+        with self._lock:
+            snap = self._task
+        card = self.task_card
+        view = task_view(snap)
+        compact = self.is_compact()
+        font = self._label_font()
+        if not view:
+            card["pct"].configure(text="--", fg=MUTED)
+            card["detail"].configure(
+                text=self.t("task_wait" if snap else "task_none"), fg=MUTED, font=font
+            )
+            if snap and not compact:
+                card["lines"][0].configure(text=self._task_title_text(snap), font=font)
+                for lab in card["lines"][1:]:
+                    lab.configure(text="")
+            else:
+                for lab in card["lines"]:
+                    lab.configure(text="")
+            card["meter"].set_value(0)
+            ctx_mini = None
+        else:
+            pct = view["ctx_pct"]
+            card["pct"].configure(text=f"{pct:5.1f}%", fg=self._pct_color(pct))
+            ctx_txt = _fmt_tokens(view["ctx"])
+            win_txt = _fmt_tokens(view["window"]) if view["window"] else "--"
+            if compact:
+                card["detail"].configure(
+                    text=self.t("task_compact_line", total=_fmt_tokens(view["total"]), ctx=ctx_txt, window=win_txt),
+                    fg=TEXT,
+                    font=font,
+                )
+            else:
+                card["detail"].configure(text=self._task_title_text(snap), fg=MUTED, font=font)
+                card["lines"][0].configure(
+                    text=self.t(
+                        "task_tokens_line",
+                        total=_fmt_tokens(view["total"]),
+                        inp=_fmt_tokens(view["input"]),
+                        out=_fmt_tokens(view["output"]),
+                    ),
+                    font=font,
+                )
+                card["lines"][1].configure(
+                    text=self.t(
+                        "task_cache_line",
+                        cached=_fmt_tokens(view["cached"]),
+                        hit=view["hit"],
+                        reasoning=_fmt_tokens(view["reasoning"]),
+                    ),
+                    font=font,
+                )
+                card["lines"][2].configure(
+                    text=self.t("task_ctx_line", ctx=ctx_txt, window=win_txt, age=self._task_age_text(snap)),
+                    font=font,
+                )
+            card["meter"].set_value(pct)
+            ctx_mini = pct if view["window"] else None
+        if ctx_mini is None or not self._cfg.get("mini_task_ctx", True):
+            new_mini = None
+        else:
+            new_mini = round(ctx_mini, 1)
+        if new_mini != self._mini_ctx:
+            self._mini_ctx = new_mini
+            if self.is_mini():
+                self._redraw_capsule()
+
+    def _tick_task_age(self):
+        """Cheap per-pulse refresh of the 'updated N ago' text."""
+        if self.is_compact() or self.is_mini() or not hasattr(self, "task_card"):
+            return
+        with self._lock:
+            snap = self._task
+        view = task_view(snap)
+        if not view:
+            return
+        self.task_card["lines"][2].configure(
+            text=self.t(
+                "task_ctx_line",
+                ctx=_fmt_tokens(view["ctx"]),
+                window=_fmt_tokens(view["window"]) if view["window"] else "--",
+                age=self._task_age_text(snap),
+            )
+        )
+
     def _pulse(self):
         if self._stop.is_set():
             return
@@ -705,6 +1244,8 @@ class Hud(tk.Tk):
         remain = max(0, int(self._next_due - time.monotonic()))
         blink = "_" if (self._tick % 2 == 0) else " "
         self.hdr_status.configure(text=f"T-{remain:03d}s{blink}")
+        if self._tick % 2 == 0:
+            self._tick_task_age()
         self.after(500, self._pulse)
 
     def refresh_now(self):
@@ -1160,7 +1701,6 @@ class Hud(tk.Tk):
         lab_font = self._mini_font(12)
         pct_font = self._mini_font(13)
         if self._mini_fault:
-            text_w = 48
             clusters = [("ERR", RED, pct_font)]
         else:
             p = float((self._mini_primary or {}).get("used_percent") or 0)
@@ -1175,6 +1715,12 @@ class Hud(tk.Tk):
                 (lab7 + " ", MUTED, lab_font),
                 (c7, self._pct_color(s), pct_font),
             ]
+            ctx = getattr(self, "_mini_ctx", None)
+            if ctx is not None:
+                clusters += [
+                    (self.t("mini_ctx") + " ", MUTED, lab_font),
+                    (f"{ctx:4.1f}%", self._pct_color(ctx), pct_font),
+                ]
         # Measure with a scratch image
         scratch = ImageDraw.Draw(Image.new("RGB", (8, 8)))
         widths = []
@@ -1182,7 +1728,8 @@ class Hud(tk.Tk):
             box = scratch.textbbox((0, 0), text, font=font)
             widths.append(box[2] - box[0])
         gap = 12
-        content_w = widths[0] + widths[1] + (0 if self._mini_fault else gap + widths[2] + widths[3])
+        pairs = max(1, len(clusters) // 2)
+        content_w = sum(widths) + (0 if self._mini_fault else gap * (pairs - 1))
         pad_x = 12  # tight side padding
         pad_y = 6
         w = content_w + pad_x * 2
@@ -1230,18 +1777,19 @@ class Hud(tk.Tk):
                 box = scratch.textbbox((0, 0), text, font=font)
                 widths.append(box[2] - box[0])
             gap = 12
-            total = widths[0] + widths[1] + gap + widths[2] + widths[3]
+            pairs = len(clusters) // 2
+            total = sum(widths) + gap * (pairs - 1)
             x = (w - total) / 2
             y = h / 2
-            d.text((x, y), clusters[0][0], fill=self._hex_rgb(clusters[0][1]) + (255,), font=clusters[0][2], anchor="lm")
-            x += widths[0]
-            d.text((x, y), clusters[1][0], fill=self._hex_rgb(clusters[1][1]) + (255,), font=clusters[1][2], anchor="lm")
-            x += widths[1] + gap
-            cx = x - gap / 2
-            d.ellipse((cx - 1.4, y - 1.4, cx + 1.4, y + 1.4), fill=self._hex_rgb(CYAN_DIM) + (255,))
-            d.text((x, y), clusters[2][0], fill=self._hex_rgb(clusters[2][1]) + (255,), font=clusters[2][2], anchor="lm")
-            x += widths[2]
-            d.text((x, y), clusters[3][0], fill=self._hex_rgb(clusters[3][1]) + (255,), font=clusters[3][2], anchor="lm")
+            for i in range(pairs):
+                if i:
+                    x += gap
+                    cx = x - gap / 2
+                    d.ellipse((cx - 1.4, y - 1.4, cx + 1.4, y + 1.4), fill=self._hex_rgb(CYAN_DIM) + (255,))
+                for j in (2 * i, 2 * i + 1):
+                    text, col, font = clusters[j]
+                    d.text((x, y), text, fill=self._hex_rgb(col) + (255,), font=font, anchor="lm")
+                    x += widths[j]
 
         self._mini_rgba = img
         self._bind_mini_root(True)
@@ -1281,6 +1829,7 @@ class Hud(tk.Tk):
                     pass
             self.card5["wrap"].pack_forget()
             self.card7["wrap"].pack_forget()
+            self.task_card["wrap"].pack_forget()
             if hasattr(self, "compact_bar"):
                 self.compact_bar.pack_forget()
             self._ensure_mini_bar()
@@ -1334,21 +1883,25 @@ class Hud(tk.Tk):
                     self.compact_mini_btn.pack(side="right")
             self.card5["title"].configure(text=self.t("card5_compact"))
             self.card7["title"].configure(text=self.t("card7_compact"))
+            self.task_card["title"].configure(text=self.t("task_card_compact"))
             self.card5["wrap"].pack(fill="x", padx=14, pady=(2, 4))
             self.card7["wrap"].pack(fill="x", padx=14, pady=(2, 4))
+            self.task_card["wrap"].pack(fill="x", padx=14, pady=(2, 4))
             self.compact_bar.pack(fill="x", padx=14, pady=(4, 10))
             self.minsize(300, 200)
-            self.maxsize(560, 360)
+            self.maxsize(560, 480)
         else:
             if hasattr(self, "compact_bar"):
                 self.compact_bar.pack_forget()
             self.card5["title"].configure(text=self.t("card5"))
             self.card7["title"].configure(text=self.t("card7"))
+            self.task_card["title"].configure(text=self.t("task_card"))
             self.maxsize(1400, 1200)
             self.minsize(420, 400)
             self.meta.pack(fill="x", padx=14)
             self.card5["wrap"].pack(fill="x", padx=14, pady=6)
             self.card7["wrap"].pack(fill="x", padx=14, pady=6)
+            self.task_card["wrap"].pack(fill="x", padx=14, pady=6)
             self.extra_wrap.pack(fill="both", expand=True, padx=14, pady=8)
             self.ctrl.pack(fill="x", padx=14, pady=(0, 6))
             self.btns.pack(fill="x", padx=14, pady=(0, 12))
@@ -1356,11 +1909,17 @@ class Hud(tk.Tk):
             if hasattr(self, "mini_btn"):
                 self.mini_btn.configure(text=self.t("mini"))
         pad = (4, 6) if compact else (6, 10)
-        for card in (self.card5, self.card7):
+        for card in (self.card5, self.card7, self.task_card):
             card["meter"].pack_configure(pady=pad)
             # show meter/detail again if leaving mini
             card["detail"].pack(fill="x", padx=10)
+            for lab in card.get("lines", ()):
+                if compact:
+                    lab.pack_forget()
+                else:
+                    lab.pack(fill="x", padx=10, before=card["meter"])
             card["meter"].pack(fill="x", padx=10, pady=pad)
+        self._paint_task()
         self._fit_window()
 
     def _fit_window(self):
