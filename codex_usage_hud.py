@@ -116,7 +116,7 @@ STRINGS = {
         "task_cache_line": "CACHED {cached} ({hit:.1f}%)   REASONING {reasoning}",
         "task_ctx_line": "CTX {ctx} / {window}   UPDATED {age} AGO",
         "task_compact_line": "TOTAL {total}   CTX {ctx} / {window}",
-        "mini_ctx": "CTX",
+        "mini_tokens": "TOK",
     },
     "zh": {
         "window_title": "CODEX // 用量",
@@ -170,7 +170,7 @@ STRINGS = {
         "task_cache_line": "缓存 {cached}（命中 {hit:.1f}%）   推理 {reasoning}",
         "task_ctx_line": "上下文 {ctx} / {window}   {age}前更新",
         "task_compact_line": "总计 {total}   上下文 {ctx} / {window}",
-        "mini_ctx": "上下文",
+        "mini_tokens": "总量",
     },
 }
 
@@ -212,7 +212,9 @@ def load_ui_config() -> dict:
     except Exception:
         local_sec = DEFAULT_LOCAL_REFRESH_SEC
     data["local_refresh_sec"] = max(MIN_LOCAL_REFRESH_SEC, min(MAX_LOCAL_REFRESH_SEC, local_sec))
-    data["mini_task_ctx"] = bool(data.get("mini_task_ctx", True))
+    # Mini capsule task section (total tokens). `mini_task_ctx` is the legacy name, still honored.
+    legacy = data.pop("mini_task_ctx", True)
+    data["mini_task_tokens"] = bool(data.get("mini_task_tokens", legacy))
     data["task_follow_selected"] = bool(data.get("task_follow_selected", True))
     data.setdefault("topmost", True)
     mode = str(data.get("mode") or "detail").lower()
@@ -1077,7 +1079,7 @@ class Hud(tk.Tk):
         self._task_reader.follow_selected = bool(self._cfg.get("task_follow_selected", True))
         self._task = None  # latest TaskUsageReader snapshot
         self._task_polling = False
-        self._mini_ctx = None
+        self._mini_tokens = None  # capsule task text: None = hidden, "—" = no data
 
         self._font_title = tkfont.Font(family="Consolas", size=13, weight="bold")
         self._font_mono = tkfont.Font(family="Consolas", size=9)
@@ -1405,7 +1407,7 @@ class Hud(tk.Tk):
                 for lab in card["lines"]:
                     lab.configure(text="")
             card["meter"].set_value(0)
-            ctx_mini = None
+            tokens_mini = None
         else:
             pct = view["ctx_pct"]
             card["pct"].configure(text=f"{pct:5.1f}%", fg=self._pct_color(pct))
@@ -1442,13 +1444,13 @@ class Hud(tk.Tk):
                     font=font,
                 )
             card["meter"].set_value(pct)
-            ctx_mini = pct if view["window"] else None
-        if ctx_mini is None or not self._cfg.get("mini_task_ctx", True):
+            tokens_mini = _fmt_tokens(view["total"])
+        if not self._cfg.get("mini_task_tokens", True):
             new_mini = None
         else:
-            new_mini = round(ctx_mini, 1)
-        if new_mini != self._mini_ctx:
-            self._mini_ctx = new_mini
+            new_mini = tokens_mini or "—"
+        if new_mini != self._mini_tokens:
+            self._mini_tokens = new_mini
             if self.is_mini():
                 self._redraw_capsule()
 
@@ -1948,11 +1950,12 @@ class Hud(tk.Tk):
                 (lab7 + " ", MUTED, lab_font),
                 (c7, self._pct_color(s), pct_font),
             ]
-            ctx = getattr(self, "_mini_ctx", None)
-            if ctx is not None:
+            tokens = getattr(self, "_mini_tokens", None)
+            if tokens is not None:
+                # Plain count: no percentage thresholds, normal color (muted when empty).
                 clusters += [
-                    (self.t("mini_ctx") + " ", MUTED, lab_font),
-                    (f"{ctx:4.1f}%", self._pct_color(ctx), pct_font),
+                    (self.t("mini_tokens") + " ", MUTED, lab_font),
+                    (tokens, MUTED if tokens == "—" else CYAN, pct_font),
                 ]
         # Measure with a scratch image
         scratch = ImageDraw.Draw(Image.new("RGB", (8, 8)))

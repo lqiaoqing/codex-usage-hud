@@ -32,7 +32,7 @@ pythonw codex_usage_hud.py
 | --- | --- |
 | 详细 `detail` | 账号 / 套餐、5H / 7D 进度条、当前任务 token、credits、刷新间隔、置顶、同步、打开用量页 |
 | 简洁 `compact` | 5H / 7D 额度、当前任务总 token 和上下文占比、同步按钮 |
-| 迷你 `mini` | 胶囊条：5H / 7D 百分比 + 当前任务上下文百分比 + 展开 |
+| 迷你 `mini` | 胶囊条：5H / 7D 百分比 + 当前任务总 token + 展开 |
 
 详细面板用 COMPACT / 简洁 切布局，简洁面板用 DETAIL / 详细切回来。切换会按内容改窗口大小。
 
@@ -50,7 +50,7 @@ pythonw codex_usage_hud.py
 - 上下文：最近一轮的输入 token ÷ 模型上下文窗口，进度条颜色规则同上
 - 距离 Codex 上一次写入 token 统计过了多久
 
-数字格式如 `2.78M`、`19.4K`。简洁模式只显示总计和上下文；迷你胶囊多一个上下文百分比（可用 `mini_task_ctx` 关掉）。
+数字格式如 `2.78M`、`19.4K`。简洁模式只显示总计和上下文；迷你胶囊多一段 `TOK` / `总量`，即当前任务的总 token（`total_tokens`，不套用百分比颜色，没数据时显示 `—`；可用 `mini_task_tokens` 关掉）。
 
 “当前任务”怎么定：
 
@@ -72,7 +72,7 @@ rollout 里取最后一条 `token_count` 事件。大文件只从尾部往回读
   "mode": "detail",
   "lang": "en",
   "local_refresh_sec": 4,
-  "mini_task_ctx": true,
+  "mini_task_tokens": true,
   "task_follow_selected": true
 }
 ```
@@ -83,7 +83,7 @@ rollout 里取最后一条 `token_count` 事件。大文件只从尾部往回读
 - `expand_mode`：从迷你展开时回到 `compact` 或 `detail`
 - `lang`：`en`（默认）或 `zh`
 - `local_refresh_sec`：本地任务 token 的读取间隔，1–60 秒，默认 4，和联网同步互不影响
-- `mini_task_ctx`：迷你胶囊是否显示当前任务上下文百分比，默认 `true`
+- `mini_task_tokens`：迷你胶囊是否显示当前任务总 token，默认 `true`（旧键名 `mini_task_ctx` 仍然认，保存配置时会改写成新键名）
 - `task_follow_selected`：当前任务是否跟随桌面端选中的对话，默认 `true`；设为 `false` 则只看最近写入的 rollout
 
 登录文件 `~/.codex/auth.json` 不要放进仓库。
