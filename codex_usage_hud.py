@@ -43,6 +43,7 @@ PANEL2 = "#101826"
 LINE = "#1c2a3a"
 CYAN = "#3ee0c6"
 CYAN_DIM = "#1a8f80"
+SEL_BG = "#0c2226"  # task list: row of the selected task
 AMBER = "#f0b429"
 RED = "#ff5c7a"
 TEXT = "#d7e2ee"
@@ -63,6 +64,7 @@ ROLLOUT_TAIL_LIMIT = 32 * 1024 * 1024  # max bytes scanned backwards per task sw
 ROLLOUT_ID_RESCAN_SEC = 3  # min gap between full rescans when a selected id has no rollout yet
 LOG_DAY_DIRS = 2  # newest Codex desktop log day folders to watch
 LOG_TAIL_LIMIT = 16 * 1024 * 1024  # max bytes scanned backwards per log file on first sight
+LOG_HISTORY_LIMIT = 24 * 1024 * 1024  # per log file, once: "last viewed" times for the task list
 ROLLOUT_FULL_SCAN_LIMIT = 512 * 1024 * 1024  # bigger rollouts: usage from the tail only, cost unknown
 ROLLOUT_READ_CHUNK = 8 * 1024 * 1024
 
@@ -643,6 +645,7 @@ def _parse_token_line(raw: bytes) -> dict | None:
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _LOG_ROUTE_RE = re.compile(rb"ownerRoutePath=(\S*)")
 _LOG_VIEW_RE = re.compile(rb"thread_stream_view_activity_changed active=true conversationId=(\S+)")
+_LOG_NAV_RE = re.compile(rb"ownerRoutePath=|thread_stream_view_activity_changed active=true")
 
 
 def _parse_selection_line(raw: bytes) -> tuple[str, str | None] | None:
@@ -693,6 +696,29 @@ class SelectedThreadTracker:
         self.logs_dir = Path(logs_dir)
         self._files: dict[str, dict] = {}  # path -> {"offset": int, "event": (ts, id) | None}
         self._primed = False
+        # thread id -> epoch of the last time it was opened in the Codex UI (all watched logs)
+        self.history: dict[str, float] = {}
+
+    def _note(self, ev):
+        if not ev or not ev[1]:
+            return
+        ts = _parse_iso_utc(ev[0])
+        if ts and ts > self.history.get(ev[1], 0.0):
+            self.history[ev[1]] = ts
+
+    def _scan_history(self, path: str, end: int):
+        """One-time: every navigation line in the last LOG_HISTORY_LIMIT bytes of a log."""
+        try:
+            with open(path, "rb") as fh:
+                start = max(0, end - LOG_HISTORY_LIMIT)
+                fh.seek(start)
+                data = fh.read(end - start)
+        except OSError:
+            return
+        for m in _LOG_NAV_RE.finditer(data):
+            a = data.rfind(b"\n", 0, m.start()) + 1
+            b = data.find(b"\n", m.end())
+            self._note(_parse_selection_line(data[a : b if b >= 0 else len(data)]))
 
     def _day_dirs(self) -> list[str]:
         out = []
@@ -775,6 +801,7 @@ class SelectedThreadTracker:
             ev = _parse_selection_line(raw)
             if ev and (st["event"] is None or ev[0] >= st["event"][0]):
                 st["event"] = ev
+            self._note(ev)
 
     def poll(self) -> tuple[str, str | None] | None:
         """Return (iso_ts, thread_id | None) of the newest UI navigation, or None if unknown."""
@@ -801,6 +828,8 @@ class SelectedThreadTracker:
                 self._files[p] = {"offset": sizes[p], "event": ev}
                 if ev and (best is None or ev[0] > best[0]):
                     best = ev
+            for p in order:
+                self._scan_history(p, sizes[p])
             self._primed = True
         else:
             for p, size in sizes.items():
@@ -1989,8 +2018,22 @@ class TaskMonitor:
             self._rescan(cfg)
         hours = float(cfg.get("task_list_hours", 6)) * 3600
         max_n = int(cfg.get("task_list_max", 5))
-        acts = []
-        for p, _mt in self._files:
+        idle_s = max(60, int(cfg.get("idle_minutes", 30)) * 60)
+        show_sub = bool(cfg.get("task_list_show_subagents", False))
+        sel = getattr(self.reader, "selector", None)
+        viewed = dict(sel.history) if sel is not None else {}
+        files = list(self._files)
+        known = {p for p, _ in files}
+        # Tasks opened in the Codex UI recently rank up even if their rollout is old.
+        for tid, vts in sorted(viewed.items(), key=lambda kv: kv[1], reverse=True)[:20]:
+            if now - vts > hours:
+                break
+            vp = self.reader._rollout_for_id(tid)
+            if vp and vp not in known:
+                files.append((vp, 0.0))
+                known.add(vp)
+        acts = []  # (event_ts, path, size)
+        for p, _mt in files:
             try:
                 st_ = os.stat(p)
             except OSError:
@@ -2010,23 +2053,32 @@ class TaskMonitor:
                 act = max(act, cached[1])
             acts.append((act, p, st_.st_size))
         acts.sort(reverse=True)
-        idle_s = max(60, int(cfg.get("idle_minutes", 30)) * 60)
-        show_sub = bool(cfg.get("task_list_show_subagents", False))
-        recent = [x for x in acts if now - x[0] <= hours]
-        for _a, p, _s in recent:
-            if p not in self._meta:
+        for _a, p, _s in acts:
+            if p not in self._meta and (now - _a <= hours or p == selected_path):
                 self._meta[p] = read_session_meta(p)
-        listed = [x for x in recent if show_sub or not self._meta[x[1]]["sub"]][:max_n]
-        listed_paths = {p for _, p, _ in listed}
-        # Active guardian-review / sub-agent threads: tracked (not listed) to mark their parent.
-        subs = [x for x in recent if self._meta[x[1]]["sub"] and now - x[0] <= idle_s and x[1] not in listed_paths][:8]
-        tracked = listed + subs
-        paths = {p for _, p, _ in tracked}
-        if selected_path and selected_path not in paths:
+        last_act: dict[str, float] = {}
+        for a, p, _s in acts:
+            m = _ROLLOUT_RE.search(os.path.basename(p))
+            last_act[p] = max(a, viewed.get(m.group(2).lower(), 0.0) if m else 0.0)
+        is_sub = lambda p: bool((self._meta.get(p) or {}).get("sub"))
+        # Candidates: the selected task, every task written within idle_minutes (only those
+        # can be running/waiting), and the top task_list_max by last activity.
+        pool = [x for x in acts if (show_sub or not is_sub(x[1])) and now - last_act[x[1]] <= hours]
+        pool.sort(key=lambda x: last_act[x[1]], reverse=True)
+        cand = [x for x in pool if now - x[0] < idle_s][:10]
+        cpaths = {x[1] for x in cand}
+        cand += [x for x in pool if x[1] not in cpaths][:max_n]
+        if selected_path and selected_path not in {x[1] for x in cand}:
             try:
-                tracked.append((-1.0, selected_path, os.stat(selected_path).st_size))
+                cand.insert(0, (0.0, selected_path, os.stat(selected_path).st_size))
             except OSError:
                 pass
+        if selected_path and selected_path not in self._meta:
+            self._meta[selected_path] = read_session_meta(selected_path)
+        cand_paths = {x[1] for x in cand}
+        # Active guardian-review / sub-agent threads: tracked (not listed) to mark their parent.
+        subs = [x for x in acts if is_sub(x[1]) and now - x[0] <= idle_s and x[1] not in cand_paths][:8]
+        tracked = cand + subs
         keep = {p for _, p, _ in tracked}
         # Quota history: rate_limits from other rollouts active in the last 24h (tail, once).
         for a, p, size in acts:
@@ -2062,9 +2114,9 @@ class TaskMonitor:
                 if state.turn_open and state.last_ts and now - state.last_ts < idle_s:
                     reviews[meta["parent"]] = state.last_ts
         tasks = []
-        for a, p, _size in tracked:
+        for a, p, _size in cand:
             state = self.states.get(p)
-            if state is None or (p not in listed_paths and p != selected_path):
+            if state is None:
                 continue
             m = _ROLLOUT_RE.search(os.path.basename(p))
             tid = m.group(2).lower() if m else None
@@ -2076,11 +2128,17 @@ class TaskMonitor:
                     "title": self.reader._title_for(m.group(2) if m else None),
                     "activity": activity_of(state, info["status"], info.get("waiting_kind")),
                     "selected": p == selected_path,
-                    "listed": p in listed_paths,
-                    "sub": bool((self._meta.get(p) or {}).get("sub")),
+                    "viewed_at": viewed.get(tid) if tid else None,
+                    "last_act": max(last_act.get(p, 0.0), state.last_ts or 0.0),
+                    "sub": is_sub(p),
                 }
             )
             tasks.append(info)
+        # Order: selected first (always listed), then running/waiting, then done/idle; each by
+        # last activity = max(last rollout event, last time opened in the Codex UI).
+        tasks.sort(key=lambda t: (not t["selected"], t["status"] not in ("running", "waiting"), -t["last_act"]))
+        for i, t in enumerate(tasks):
+            t["listed"] = i < max_n
         events = self._transitions(tasks, cfg)
         sel_state = self.states.get(selected_path) if selected_path else None
         lookback = max(10, int(cfg.get("forecast_lookback_min", 60))) * 60
@@ -2916,6 +2974,10 @@ class Hud(tk.Tk):
                 row["title"].configure(text=self._clip(name, 44), fg=CYAN if t.get("selected") else TEXT,
                                        font=self._tiny_label_font())
                 row["age"].configure(text=_fmt_age(t.get("age"), self.lang()), font=self._font_tiny)
+                bg = SEL_BG if t.get("selected") else PANEL
+                if row["row"].cget("bg") not in (bg, PANEL2):
+                    for w in (row["row"], row["tag"], row["title"], row["age"]):
+                        w.configure(bg=bg)
             if getattr(self, "_rows_shown", None) != shown:
                 for row in self.task_rows:
                     row["row"].pack_forget()
@@ -2962,7 +3024,8 @@ class Hud(tk.Tk):
             self._compact_status_prev = text
 
     def _row_hover(self, row, on: bool):
-        bg = PANEL2 if on else PANEL
+        t = next((r["task"] for r in self.task_rows if r["row"] is row), None)
+        bg = PANEL2 if on else (SEL_BG if t and t.get("selected") else PANEL)
         row.configure(bg=bg)
         for w in row.winfo_children():
             w.configure(bg=bg)
