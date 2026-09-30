@@ -2,7 +2,7 @@
 
 Windows 桌面小窗，用来盯 Codex / ChatGPT 的 **5 小时** 和 **7 天** 额度。数字和 `codex /status`、chatgpt.com 用量页同一套接口。
 
-另外会读本机 Codex 会话记录，显示**当前任务**（Codex 桌面端里正打开的那个对话）用了多少 token、上下文占了多少。这部分纯本地，不联网。
+另外会读本机 Codex 会话记录，显示**当前任务**（Codex 桌面端里正打开的那个对话）用了多少 token、上下文占了多少、此刻在做什么，列出最近活跃的任务及其状态，预测额度什么时候用完，任务疑似卡住或等你批准时弹通知。这部分纯本地、只读，不联网。
 
 不爬浏览器，也不读 ChatGPT 桌面端。登录态来自本机 Codex CLI 的 `~/.codex/auth.json`。
 
@@ -30,8 +30,8 @@ pythonw codex_usage_hud.py
 
 | 模式 | 内容 |
 | --- | --- |
-| 详细 `detail` | 账号 / 套餐、5H / 7D 进度条、当前任务 token 与 API 估价、credits、刷新间隔、置顶、同步、打开用量页 |
-| 简洁 `compact` | 5H / 7D 额度、当前任务总 token、上下文占比和 API 估价、同步按钮 |
+| 详细 `detail` | 账号 / 套餐、5H / 7D 进度条和额度预测、当前任务 token / API 估价 / 当前动作、任务一览（可折叠）、账户积分（可折叠）、刷新间隔、置顶、同步、打开用量页 |
+| 简洁 `compact` | 5H / 7D 额度、当前任务总 token、上下文占比和 API 估价、同步按钮；有情况时多一行状态（任务计数、卡住提醒、额度会在重置前用完的警告） |
 | 迷你 `mini` | 胶囊条：5H / 7D 百分比 + 当前任务总 token + 展开 |
 
 详细面板用 COMPACT / 简洁 切布局，简洁面板用 DETAIL / 详细切回来。切换会按内容改窗口大小。
@@ -61,6 +61,68 @@ pythonw codex_usage_hud.py
 选中的任务如果还没有 `token_count`，卡片只显示任务名和“暂无 token 数据”，不会沿用上一个任务的数字。
 
 rollout 里取最后一条 `token_count` 事件。大文件只从尾部往回读，之后只读新增的字节；日志文件同理。读取都在后台线程，不卡界面。Windows 在文件被占用期间经常不更新修改时间和目录里的大小，所以会直接 `stat` 文件、并参考文件末尾那条记录的时间戳。
+
+### 当前在做什么
+
+当前任务卡片里多一行 `NOW ▸` / `当前 ▸`，显示所选任务此刻的动作和持续时间，例如：
+
+- `$ git status --short` 正在执行的命令（长路径缩成文件名）
+- `修改 codex_usage_hud.py` 正在打补丁（apply_patch）
+- `搜索 …` / `查看图片 …` / `浏览器 …` / `工具 mcp.xxx` 网页搜索、看图、浏览器、MCP 工具
+- `思考中` / `思考中（上一步 …）` 模型在推理，或上一步工具已返回、在等模型下一步
+- `撰写回复`、`等待你批准 / 回复`、`自动审批审核中`、`已完成 · 最后 …`
+
+来源是 rollout 的最新事件：`response_item` 里的 `custom_tool_call`（Codex 代码模式 `exec`，从 JS 里解析 `tools.exec_command({cmd})`、`tools.apply_patch("*** Update File: …")`、`tools.web__run` 等）和 `function_call`，没有对应 `*_call_output` 的调用算“正在执行”；`reasoning`、`message`、`event_msg/item_completed` 的 `Reasoning` 摘要用于“思考中”。
+
+### 任务一览
+
+详细模式里「任务一览 // TASKS」（点标题折叠 / 展开），列出最近 `task_list_hours`（默认 6）小时内有写入的前 `task_list_max`（默认 4）个任务：状态、任务名、距上次写入多久。▶ 表示 HUD 正在显示的任务。标题右侧是计数，如 `1 运行 · 1 待批准`；简洁模式把这串计数放在卡片下方。
+
+状态规则（实测 Codex 桌面端 26.928 的 rollout 得出）：
+
+| 状态 | 判定 |
+| --- | --- |
+| 运行 RUN | 最近一次 `event_msg/task_started` 之后还没有 `task_complete` / `turn_aborted`，且最后一条事件在 `idle_minutes` 以内 |
+| 待批准 WAIT | 运行中，并且：桌面端日志出现 `[desktop-notifications] show notification conversationId=<id> kind=permission`（或 `question`）且不早于 rollout 最后一条事件；或有未返回的 `request_user_input` 调用；或这个任务的 `guardian_review` 子会话正在跑（自动审批在审核） |
+| 完成 DONE | 最后一轮已 `task_complete`（或 `turn_aborted`），最后写入在 `idle_minutes` 以内 |
+| 空闲 IDLE | `idle_minutes`（默认 30）分钟内没有新写入；包括轮次没结束但长时间不动（例如被强制关掉） |
+| 卡住 STUCK | 运行中的附加标记，见下文“卡住提醒” |
+
+说明：审批请求本身不会写进 rollout（这台机器用的是 `approvals_reviewer=auto_review`，自动审批由 `thread_source=guardian_review` 的子会话完成），所以“待批准”靠桌面端日志和 guardian 子会话推断。guardian / 子代理会话（`session_meta` 里有 `parent_thread_id` 或 `source.subagent`）默认不列出，`task_list_show_subagents` 可打开。
+
+点击行：
+
+- **单击**：用 `codex://threads/<任务 id>` 在 Codex 桌面端打开这个任务（Codex 的 MSIX 包注册了 `codex:` 协议，桌面端把 `threads/<id>` 路由到本地对话），同时 HUD 立刻显示它；桌面端随后切过去，HUD 继续跟随。
+- **右键**：只在 HUD 里显示这个任务，不动 Codex。在桌面端再切换对话后恢复跟随。
+- `task_click_action` 设为 `select` 时单击也只在 HUD 里显示。
+
+### 卡住提醒与通知
+
+运行中的任务满足任一条件就标为“卡住”，卡片里出现红 / 琥珀色提示行，任务一览里状态变成 `卡住`：
+
+- **长时间没动静**：`stuck_minutes`（默认 5）分钟没有任何新事件。跑很久的构建 / 测试命令也会触发，属正常提示。
+- **重复失败**：本轮最近 `stuck_repeat_count`（默认 3）条命令结果（`item_completed` 里的 `CommandExecution`）全部失败（`status=failed` 或 `exit_code≠0`），并且命令相同，或者错误信息的关键行（含 error / cannot / not found 等的第一行，数字归一化）相同。
+
+通知（Windows 通知中心 toast）：
+
+- 任务变为“卡住”时（`notify_stuck`，默认开）
+- 任务开始等你批准 / 回答时（`notify_approval`，默认开；自动审批审核中不通知）
+- 任务完成时（`notify_complete`，默认关，Codex 自己也会发完成通知）
+- 同一任务同一类通知在 `notify_cooldown_min`（默认 10）分钟内只发一次；HUD 刚启动的第一轮只记录状态、不补发
+
+toast 用系统自带的 `powershell.exe` 调 WinRT `ToastNotificationManager`，借用 Windows PowerShell 已注册的 AppUserModelID，不装任何模块；发送在后台线程，约 0.4 秒。失败时（比如系统禁用了通知）改为在屏幕右下角弹一个 HUD 自己的小窗，10 秒后自动消失，点一下也会关。`notify_method` 可设 `popup`（只用小窗）或 `off`。
+
+### 额度预测
+
+详细模式的 5H / 7D 卡片各多一行 `EST` / `预测`：
+
+- **消耗速度**：5H 用最近 `forecast_lookback_min`（默认 60）分钟内的用量变化算每小时涨多少；7D 用最近 24 小时，按“每天”显示。样本来自联网同步的结果，以及本机 rollout 里每条 `token_count` 附带的 `rate_limits`（`used_percent`、`resets_at`，带时间戳；只取同一个重置周期内的样本）。近期样本跨度不够（5H 少于 10 分钟、7D 少于 3 小时）时，用“本窗口已用 ÷ 窗口已过去的时间”估算，数字后面带 `~`。
+- **什么时候用满**：按这个速度算出到 100% 的时间，和卡片上的重置时间比较。会在重置前用完时整行变琥珀色（1 小时内用完变红）并标 `⚠ 早于重置`；不会就显示“重置在先”；最近没涨显示“未增长”；数据不足显示 `—`。
+- **还够几轮**：5H 那行末尾的“约剩 N 轮（x%/轮）”：取 HUD 当前显示任务最近最多 5 个已完成轮次，每轮 5H 用量 = 轮次结束时的 `used_percent` − 轮次开始前最后一个样本，取平均，再用剩余额度除以它。
+- 简洁模式只在“会在重置前用完”时显示一行警告，例如 `⚠ 7天额度约 周六 03:10 用完，早于重置 周日 07:49`。
+- 时间都是本机时间：当天只显示时分，一周内显示星期，再远显示月-日。
+
+注意：5H / 7D 是账号级额度，几个任务同时跑时，“每轮用量”会把别的任务的消耗算进来，偏高；用量百分比是整数，短时间内的速度会有跳动。
 
 ### API 估价（美元）
 
@@ -104,6 +166,22 @@ gpt-5.6-sol 是官方标注的促销价（至少到 2026-11-21）。价格会变
   "local_refresh_sec": 4,
   "mini_task_tokens": true,
   "task_follow_selected": true,
+  "forecast_enabled": true,
+  "forecast_lookback_min": 60,
+  "task_list_enabled": true,
+  "task_list_max": 4,
+  "task_list_hours": 6,
+  "task_list_show_subagents": false,
+  "task_click_action": "open",
+  "idle_minutes": 30,
+  "stuck_minutes": 5,
+  "stuck_repeat_count": 3,
+  "notify_enabled": true,
+  "notify_method": "toast",
+  "notify_stuck": true,
+  "notify_approval": true,
+  "notify_complete": false,
+  "notify_cooldown_min": 10,
   "model_prices": {
     "codex-auto-review": { "input": 0.20, "cached_input": 0.02, "output": 1.20 }
   }
@@ -118,6 +196,21 @@ gpt-5.6-sol 是官方标注的促销价（至少到 2026-11-21）。价格会变
 - `local_refresh_sec`：本地任务 token 的读取间隔，1–60 秒，默认 4，和联网同步互不影响
 - `mini_task_tokens`：迷你胶囊是否显示当前任务总 token，默认 `true`（旧键名 `mini_task_ctx` 仍然认，保存配置时会改写成新键名）
 - `task_follow_selected`：当前任务是否跟随桌面端选中的对话，默认 `true`；设为 `false` 则只看最近写入的 rollout
+- `forecast_enabled`：5H / 7D 卡片里的额度预测行，默认 `true`
+- `forecast_lookback_min`：5H 消耗速度看最近多少分钟，10–300，默认 60
+- `task_list_enabled`：详细模式的任务一览，默认 `true`
+- `task_list_max`：任务一览最多几行，1–10，默认 4
+- `task_list_hours`：多久以内有写入的任务算“最近活跃”，1–72 小时，默认 6
+- `task_list_show_subagents`：是否列出 guardian 审核 / 子代理会话，默认 `false`
+- `task_click_action`：单击任务行 `open`（在 Codex 打开，默认）或 `select`（只在 HUD 显示）
+- `idle_minutes`：多少分钟没写入算“空闲”，5–1440，默认 30
+- `stuck_minutes`：运行中多少分钟没有新事件算“卡住”，1–240，默认 5
+- `stuck_repeat_count`：最近几条命令相同失败算“卡住”，2–10，默认 3
+- `notify_enabled`：总开关，默认 `true`
+- `notify_method`：`toast`（系统通知，失败时退回小窗，默认）、`popup`（只用 HUD 小窗）、`off`
+- `notify_stuck` / `notify_approval` / `notify_complete`：卡住 / 等待批准 / 完成时是否通知，默认 开 / 开 / 关
+- `notify_cooldown_min`：同一任务同类通知的最短间隔，1–240 分钟，默认 10
+- `section_tasks_open` / `section_account_open`：任务一览、账户积分两个折叠区是否展开（点标题切换时自动保存），默认 展开 / 折叠
 - `model_prices`：可选，覆盖或补充模型价格（美元 / 每 100 万 token）。每个模型写 `input`、`output`，可选 `cached_input`（默认同输入价）、`cache_write`（默认按输入价）、`long_context`（默认 `true`，是否套用 >272K 加价）。上面的 `codex-auto-review` 只是写法示例，不是官方价格
 
 登录文件 `~/.codex/auth.json` 不要放进仓库。
@@ -134,7 +227,9 @@ Codex 要两边都有剩余额度才能继续用：5h 和 7d 任一打满都会�
 
 - `~/.codex/sessions/**/rollout-*.jsonl` 里 `type=event_msg`、`payload.type=token_count` 的行（`info.total_token_usage`、`info.last_token_usage`、`info.model_context_window`）
 - `~/.codex/session_index.jsonl` 里的 `thread_name`
-- `%LOCALAPPDATA%\Codex\Logs\` 下桌面端日志里的对话切换记录（只读，用来判断当前选中的任务）
+- `%LOCALAPPDATA%\Codex\Logs\` 下桌面端日志里的对话切换记录（只读，用来判断当前选中的任务）和 `kind=permission|question` 的通知记录（判断“待批准”）
+- rollout 里的 `task_started` / `task_complete` / `turn_aborted`、`custom_tool_call` / `function_call` 及其输出、`item_completed`（命令结果、推理摘要）和 `token_count.rate_limits`（任务状态、当前动作、卡住判定、额度预测）
+- 打开任务用 `codex://threads/<id>`，只是让系统把链接交给 Codex 桌面端
 
 ## 文件
 

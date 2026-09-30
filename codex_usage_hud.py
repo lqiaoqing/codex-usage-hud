@@ -1,6 +1,7 @@
 """Codex Usage HUD — geek-styled always-on-top widget for 5h / 7d quotas."""
 from __future__ import annotations
 
+import bisect
 import ctypes
 import json
 import math
@@ -146,6 +147,62 @@ STRINGS = {
         "task_cost_unknown": "API EST —   no API price for {models}",
         "task_cost_na": "API EST —",
         "mini_tokens": "TOK",
+        "sec_tasks": "TASKS  //  RECENT",
+        "sec_account": "ACCOUNT  //  CREDITS",
+        "win5": "5H",
+        "win7": "7D",
+        "rate_h": "{v:.1f}%/h",
+        "rate_d": "{v:.1f}%/d",
+        "fc_runs_out": "EST {rate}{basis} → 100% @{eta}  ⚠ BEFORE RESET",
+        "fc_ok": "EST {rate}{basis} → 100% @{eta}, resets first",
+        "fc_flat": "EST not rising — lasts until reset",
+        "fc_na": "EST —  not enough data yet",
+        "fc_reset": "EST window reset — waiting for data",
+        "fc_basis_window": "~",
+        "fc_turns": "   ≈{left} turns @{avg:.1f}%",
+        "fc_turns_inf": "   ~0%/turn",
+        "fc_warn_compact": "⚠ {win} runs out ~{eta}, before reset {reset}",
+        "st_running": "RUN",
+        "st_waiting": "WAIT",
+        "st_done": "DONE",
+        "st_idle": "IDLE",
+        "st_stuck": "STUCK",
+        "cnt_running": "{n} running",
+        "cnt_waiting": "{n} waiting",
+        "cnt_stuck": "{n} stuck",
+        "cnt_done": "{n} done",
+        "tasks_none": "no task active in the last {h}h",
+        "tasks_hint": "click: open in Codex   right-click: show here",
+        "tasks_hint_select": "click: show this task here",
+        "act_prefix": "NOW",
+        "act_cmd": "$ {text}",
+        "act_patch": "patch {text}",
+        "act_web": "web {text}",
+        "act_image": "view image {text}",
+        "act_stdin": "polling process output",
+        "act_tool": "tool {text}",
+        "act_browser": "browser {text}",
+        "act_ask": "asking you {text}",
+        "act_wait": "waiting for sub-agent",
+        "act_think": "thinking {text}",
+        "act_after": "thinking (after {text})",
+        "act_reply": "writing reply",
+        "act_start": "turn started",
+        "act_await": "waiting for your approval / answer {text}",
+        "act_review": "auto-review of approval {text}",
+        "act_done": "done · last {text}",
+        "act_aborted": "interrupted",
+        "act_line": "{prefix} ▸ {what}   {age}",
+        "alert_silent": "⚠ STUCK? no new events for {age} · {title}",
+        "alert_repeat": "⚠ LOOP? same failure {n}× · {cmd}",
+        "alert_waiting": "⏸ waiting for approval · {title}",
+        "n_stuck_title": "Codex task may be stuck",
+        "n_stuck_silent": "{title}: no new events for {age}",
+        "n_stuck_repeat": "{title}: same command failed {n}× — {cmd}",
+        "n_approval_title": "Codex is waiting for you",
+        "n_approval_body": "{title}: needs approval / an answer",
+        "n_complete_title": "Codex task finished",
+        "n_complete_body": "{title}",
     },
     "zh": {
         "window_title": "CODEX // 用量",
@@ -203,6 +260,62 @@ STRINGS = {
         "task_cost_unknown": "API 估价 —   {models} 无公开 API 价格",
         "task_cost_na": "API 估价 —",
         "mini_tokens": "总量",
+        "sec_tasks": "任务一览",
+        "sec_account": "账户  //  积分",
+        "win5": "5小时",
+        "win7": "7天",
+        "rate_h": "{v:.1f}%/时",
+        "rate_d": "{v:.1f}%/天",
+        "fc_runs_out": "预测 {rate}{basis} → {eta} 用完 ⚠ 早于重置",
+        "fc_ok": "预测 {rate}{basis} → {eta} 满，重置在先",
+        "fc_flat": "预测 未增长，可撑到重置",
+        "fc_na": "预测 —  数据不足",
+        "fc_reset": "预测 窗口已重置，等待数据",
+        "fc_basis_window": "~",
+        "fc_turns": "  约剩{left}轮（{avg:.1f}%/轮）",
+        "fc_turns_inf": "   每轮≈0%",
+        "fc_warn_compact": "⚠ {win}额度约 {eta} 用完，早于重置 {reset}",
+        "st_running": "运行",
+        "st_waiting": "待批准",
+        "st_done": "完成",
+        "st_idle": "空闲",
+        "st_stuck": "卡住",
+        "cnt_running": "{n} 运行",
+        "cnt_waiting": "{n} 待批准",
+        "cnt_stuck": "{n} 卡住",
+        "cnt_done": "{n} 完成",
+        "tasks_none": "最近 {h} 小时没有活跃任务",
+        "tasks_hint": "单击：在 Codex 打开   右键：在 HUD 显示",
+        "tasks_hint_select": "单击：在 HUD 显示该任务",
+        "act_prefix": "当前",
+        "act_cmd": "$ {text}",
+        "act_patch": "修改 {text}",
+        "act_web": "搜索 {text}",
+        "act_image": "查看图片 {text}",
+        "act_stdin": "等待进程输出",
+        "act_tool": "工具 {text}",
+        "act_browser": "浏览器 {text}",
+        "act_ask": "向你提问 {text}",
+        "act_wait": "等待子任务",
+        "act_think": "思考中 {text}",
+        "act_after": "思考中（上一步 {text}）",
+        "act_reply": "撰写回复",
+        "act_start": "本轮开始",
+        "act_await": "等待你批准 / 回复 {text}",
+        "act_review": "自动审批审核中 {text}",
+        "act_done": "已完成 · 最后 {text}",
+        "act_aborted": "已中断",
+        "act_line": "{prefix} ▸ {what}   {age}",
+        "alert_silent": "⚠ 疑似卡住：{age}无新事件 · {title}",
+        "alert_repeat": "⚠ 疑似死循环：同样失败 {n} 次 · {cmd}",
+        "alert_waiting": "⏸ 等待批准 · {title}",
+        "n_stuck_title": "Codex 任务可能卡住了",
+        "n_stuck_silent": "{title}：已 {age} 没有新事件",
+        "n_stuck_repeat": "{title}：同一命令连续失败 {n} 次 — {cmd}",
+        "n_approval_title": "Codex 在等你",
+        "n_approval_body": "{title}：需要批准 / 回复",
+        "n_complete_title": "Codex 任务完成",
+        "n_complete_body": "{title}",
     },
 }
 
@@ -228,6 +341,29 @@ EXTRA_ROWS = {
 
 
 
+MONITOR_INT_KEYS = (
+    # key, default, min, max
+    ("forecast_lookback_min", 60, 10, 300),
+    ("task_list_max", 4, 1, 10),
+    ("task_list_hours", 6, 1, 72),
+    ("idle_minutes", 30, 5, 1440),
+    ("stuck_minutes", 5, 1, 240),
+    ("stuck_repeat_count", 3, 2, 10),
+    ("notify_cooldown_min", 10, 1, 240),
+)
+MONITOR_BOOL_KEYS = (
+    ("forecast_enabled", True),
+    ("task_list_enabled", True),
+    ("notify_enabled", True),
+    ("notify_stuck", True),
+    ("notify_approval", True),
+    ("notify_complete", False),
+    ("task_list_show_subagents", False),
+    ("section_tasks_open", True),
+    ("section_account_open", False),
+)
+
+
 def load_ui_config() -> dict:
     data = _read_json(CONFIG_PATH) or {}
     if not isinstance(data, dict):
@@ -248,6 +384,19 @@ def load_ui_config() -> dict:
     legacy = data.pop("mini_task_ctx", True)
     data["mini_task_tokens"] = bool(data.get("mini_task_tokens", legacy))
     data["task_follow_selected"] = bool(data.get("task_follow_selected", True))
+    # Task monitor / forecast / alerts (feat/task-monitor).
+    for key, default, lo, hi in MONITOR_INT_KEYS:
+        try:
+            val = int(data.get(key, default))
+        except Exception:
+            val = default
+        data[key] = max(lo, min(hi, val))
+    for key, default in MONITOR_BOOL_KEYS:
+        data[key] = bool(data.get(key, default))
+    method = str(data.get("notify_method") or "toast").lower()
+    data["notify_method"] = method if method in ("toast", "popup", "off") else "toast"
+    click = str(data.get("task_click_action") or "open").lower()
+    data["task_click_action"] = click if click in ("open", "select") else "open"
     data.setdefault("topmost", True)
     mode = str(data.get("mode") or "detail").lower()
     if mode not in ("detail", "compact", "mini"):
@@ -689,6 +838,10 @@ class TaskUsageReader:
         self.archived_dir = Path(archived_dir) if archived_dir else None
         self.selector = SelectedThreadTracker(logs_dir) if logs_dir else None
         self.follow_selected = True
+        # (thread id, selection event seen at click time): a task picked in the HUD task list.
+        # Cleared by the next newer Codex UI navigation (when following the Codex selection).
+        self.override: tuple | None = None
+        self._last_sel = None
         self._by_id: dict[str, str] = {}  # thread id -> rollout path
         self._id_scan_at = 0.0
         self._selection = None  # last (iso_ts, id | None) from the desktop log
@@ -911,6 +1064,10 @@ class TaskUsageReader:
             self._titles_sig = sig
         return self._titles.get(sid)
 
+    def set_override(self, tid: str | None):
+        """Show this thread in the HUD (task-list click); None returns to normal following."""
+        self.override = (tid.lower(), self._last_sel) if tid else None
+
     def _rollout_for_id(self, tid: str) -> str | None:
         path = self._by_id.get(tid)
         if path and os.path.exists(path):
@@ -935,6 +1092,20 @@ class TaskUsageReader:
                 self._selection = self.selector.poll()
             except Exception:
                 self._selection = None
+        if self._selection is not None:
+            self._last_sel = self._selection
+        override = self.override
+        if override is not None and self.follow_selected and self._selection:
+            base = override[1]
+            if base is None:
+                self.override = override = (override[0], self._selection)
+            elif self._selection[0] > base[0]:
+                self.override = override = None  # user navigated in Codex after the click
+        if override is not None:
+            path = self._rollout_for_id(override[0])
+            if path:
+                self._source = "pinned"
+        if not path and self.follow_selected:
             tid = (self._selection or (None, None))[1]
             if tid:
                 path = self._rollout_for_id(tid)
@@ -1179,6 +1350,826 @@ def _fmt_usd(v) -> str:
     return f"${v:,.2f}"
 
 
+# ---------------------------------------------------------------------------
+# Task monitor: per-task status, live activity, stuck detection, quota forecast.
+#
+# Rollout event facts (checked on real ~/.codex/sessions files, Codex desktop 26.928):
+#   event_msg/task_started            a turn begins (payload.turn_id, started_at)
+#   event_msg/task_complete           the turn ended normally (last_agent_message)
+#   event_msg/turn_aborted            the turn was interrupted (codex-rs name; rare)
+#   event_msg/token_count             usage + rate_limits (primary 5h / secondary 7d)
+#   event_msg/item_completed          finished items: CommandExecution (command, status,
+#                                     exit_code, aggregated_output), FileChange, WebSearch,
+#                                     McpToolCall, Reasoning (summary_text), AgentMessage ...
+#   response_item/custom_tool_call    "exec" code-mode call; input is JS calling
+#                                     tools.exec_command({cmd:...}), tools.apply_patch("*** Begin Patch..."),
+#                                     tools.web__run({search_query:[{q:...}]}), tools.view_image, ...
+#   response_item/function_call       direct tools (js browser REPL, wait, request_user_input_async)
+#   response_item/*_call_output       result for a call_id (a call without output = still running)
+#   response_item/reasoning|message   model thinking / assistant text
+# Approval requests are NOT written to rollouts (codex-rs does not persist them and this
+# setup uses approvals_reviewer=auto_review). The desktop log line
+#   "[desktop-notifications] show notification conversationId=<id> kind=permission|question"
+# is the only local signal that a thread waits for the user.
+# ---------------------------------------------------------------------------
+
+MONITOR_RESCAN_SEC = 15
+MONITOR_TAIL_BYTES = 6 * 1024 * 1024  # per task on first sight (turn boundaries, recent turns)
+QUOTA_SEED_BYTES = 4 * 1024 * 1024  # rate_limits history seed per rollout active in the last 24h
+QUOTA_SEED_HOURS = 24
+QUOTA_RESET_TOL = 120  # resets_at jitters by ~1s between events; same window if within this
+TOAST_AUMID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+
+_TYPE_RE = re.compile(rb'"type":"([A-Za-z_]+)"')
+_CALL_ID_RE = re.compile(rb'"call_id":"([^"]+)"')
+_LOG_NOTIFY_RE = re.compile(
+    rb"\[desktop-notifications\] show notification conversationId=(\S+) kind=(permission|question)\b"
+)
+_JS_STR = r"""("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)"""
+_TOOLS_CALL_RE = re.compile(r"tools\.([A-Za-z0-9_]+)\s*\(")
+_CMD_ARG_RE = re.compile(r"\bcmd\s*:\s*" + _JS_STR)
+_PATCH_FILE_RE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: ([^\n\\]+?)(?:\\n|\n)")
+_WEB_Q_RE = re.compile(r"\b(?:q|ref_id)\s*:\s*" + _JS_STR)
+_PATH_ARG_RE = re.compile(r"\bpath\s*:\s*" + _JS_STR)
+
+
+def _js_unquote(lit: str) -> str:
+    if not lit:
+        return ""
+    q, body = lit[0], lit[1:-1]
+    if q == '"':
+        try:
+            return json.loads(lit)
+        except Exception:
+            pass
+    return re.sub(r"\\(.)", lambda m: {"n": " ", "t": " "}.get(m.group(1), m.group(1)), body)
+
+
+def _one_line(text: str, limit: int = 160) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+_ABS_PATH_RE = re.compile(r"""(['"]?)((?:[A-Za-z]:)?[\\/](?:[^\s'"|;<>]*[\\/])+)([^\s'"\\/|;<>]+)\1""")
+
+
+def _short_paths(text: str) -> str:
+    """Absolute paths -> base names, so a command line stays readable when truncated."""
+    return _ABS_PATH_RE.sub(lambda m: m.group(3) if len(m.group(2)) > 12 else m.group(0), text)
+
+
+def _base(path: str) -> str:
+    path = str(path or "").strip().strip("'\"`").rstrip("/\\")
+    return re.split(r"[\\/]", path)[-1] if path else ""
+
+
+def describe_tool_call(name: str | None, payload: str | dict | None, namespace: str | None = None) -> tuple[str, str]:
+    """(kind, text) for a pending/last tool call. kind is a STRINGS key suffix."""
+    name = str(name or "")
+    if name == "exec" and isinstance(payload, str):
+        tools = _TOOLS_CALL_RE.findall(payload)
+        first = tools[0] if tools else ""
+        extra = len(tools) - 1
+        suffix = f" +{extra}" if extra > 0 else ""
+        if first == "exec_command":
+            m = _CMD_ARG_RE.search(payload)
+            return "cmd", _one_line(_short_paths(_js_unquote(m.group(1))) if m else "?") + suffix
+        if first == "apply_patch":
+            files = [_base(f) for f in _PATCH_FILE_RE.findall(payload)]
+            uniq = list(dict.fromkeys(f for f in files if f))
+            txt = ", ".join(uniq[:2]) + (f" +{len(uniq) - 2}" if len(uniq) > 2 else "")
+            return "patch", (txt or "?") + suffix
+        if first == "web__run":
+            m = _WEB_Q_RE.search(payload)
+            return "web", _one_line(_js_unquote(m.group(1)) if m else "") + suffix
+        if first == "view_image":
+            m = _PATH_ARG_RE.search(payload)
+            return "image", (_base(_js_unquote(m.group(1))) if m else "") + suffix
+        if first == "write_stdin":
+            return "stdin", suffix.strip()
+        if first.startswith("mcp__"):
+            parts = first.split("__")
+            return "tool", ".".join(p for p in parts[1:] if p) + suffix
+        if first:
+            return "tool", first + suffix
+        return "tool", "exec"
+    args = payload
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except Exception:
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+    if name.startswith("request_user_input"):
+        return "ask", _one_line(args.get("question") or args.get("prompt") or "", 80)
+    if name == "wait":
+        return "wait", ""
+    if name in ("js", "js_reset") and str(namespace or "").endswith("repl"):
+        return "browser", _one_line(args.get("title") or args.get("code") or "", 120)
+    if name in ("shell", "exec_command", "local_shell"):
+        cmd = args.get("cmd") or args.get("command") or ""
+        if isinstance(cmd, list):
+            cmd = cmd[-1] if cmd else ""
+        return "cmd", _one_line(cmd)
+    if name == "apply_patch":
+        return "patch", ", ".join(_base(f) for f in _PATCH_FILE_RE.findall(str(args.get("input") or "")))
+    return "tool", name or "?"
+
+
+def _cmd_result(item: dict) -> dict | None:
+    """Normalize an item_completed CommandExecution for repeat detection."""
+    cmd = item.get("command")
+    parsed = item.get("parsed_cmd")
+    text = ""
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+        text = " && ".join(str(p.get("cmd") or "") for p in parsed if isinstance(p, dict))
+    if not text:
+        text = cmd[-1] if isinstance(cmd, list) and cmd else str(cmd or "")
+    status = str(item.get("status") or "")
+    code = item.get("exit_code")
+    try:
+        code = int(code) if code is not None else None
+    except Exception:
+        code = None
+    failed = status == "failed" or (code not in (None, 0))
+    err = str(item.get("stderr") or "").strip() or str(item.get("aggregated_output") or "").strip()
+    lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
+    sig = ""
+    for ln in lines:
+        if re.search(r"error|exception|cannot|not found|failed|denied|无法|错误", ln, re.I):
+            sig = ln
+            break
+    if not sig and lines:
+        sig = lines[-1]
+    sig = re.sub(r"\d+", "#", sig)[:160]
+    return {"cmd": _one_line(text, 400), "failed": failed, "code": code, "sig": sig}
+
+
+def detect_repeat_failures(results: list[dict], k: int) -> dict | None:
+    """Last k command results all failed and share the same command or the same error line."""
+    if k < 2 or len(results) < k:
+        return None
+    tail = results[-k:]
+    if not all(r.get("failed") for r in tail):
+        return None
+    cmds = {r.get("cmd") for r in tail}
+    sigs = {r.get("sig") for r in tail}
+    if len(cmds) == 1:
+        return {"count": k, "cmd": tail[-1].get("cmd"), "sig": tail[-1].get("sig"), "same": "cmd"}
+    if len(sigs) == 1 and next(iter(sigs)):
+        return {"count": k, "cmd": tail[-1].get("cmd"), "sig": tail[-1].get("sig"), "same": "error"}
+    return None
+
+
+class RolloutState:
+    """Incremental parser of one rollout: turn state, pending calls, activity, failures."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.offset = 0
+        self.last_ts: float | None = None
+        self.turn_open: bool | None = None  # None = no turn boundary seen in the scanned tail
+        self.turn_started_ts: float | None = None
+        self.turn_ended_ts: float | None = None
+        self.turn_start_primary: tuple | None = None
+        self.last_primary: tuple | None = None  # (ts, used, resets_at)
+        self.pending: dict[str, tuple] = {}  # call_id -> (ts, kind, text)
+        self.last_activity: tuple | None = None  # (ts, kind, text)
+        self.last_tool: tuple | None = None  # (ts, kind, text) of the newest tool call
+        self.results: list[dict] = []  # command results of the current turn
+        self.turns: list[dict] = []  # completed turns: start/end primary samples
+        self.samples: list[tuple] = []  # (ts, rate_limits) appended since last drain
+
+    def _set_activity(self, ts, kind, text=""):
+        self.last_activity = (ts, kind, text)
+
+    def feed(self, raw: bytes):
+        head = raw[:400]
+        types = _TYPE_RE.findall(head)
+        if len(types) < 1:
+            return
+        outer = types[0]
+        inner = types[1] if len(types) > 1 else b""
+        m = _TS_RE.match(raw)
+        ts = _parse_iso_utc(m.group(1).decode()) if m else None
+        if ts:
+            self.last_ts = max(self.last_ts or 0.0, ts)
+        if outer == b"event_msg":
+            if inner == b"task_started":
+                self.turn_open = True
+                self.turn_started_ts = ts
+                self.turn_start_primary = self.last_primary
+                self.pending.clear()
+                self.results = []
+                self._set_activity(ts, "start")
+            elif inner in (b"task_complete", b"turn_aborted"):
+                self.turn_open = False
+                self.turn_ended_ts = ts
+                self.pending.clear()
+                if self.turn_started_ts and self.last_primary:
+                    self.turns.append(
+                        {"start_ts": self.turn_started_ts, "start": self.turn_start_primary, "end": self.last_primary}
+                    )
+                    del self.turns[:-20]
+                self._set_activity(ts, "done" if inner == b"task_complete" else "aborted")
+            elif inner == b"token_count":
+                if b'"rate_limits"' not in raw:
+                    return
+                try:
+                    pl = json.loads(raw.decode("utf-8", "replace")).get("payload") or {}
+                except Exception:
+                    return
+                rl = pl.get("rate_limits")
+                if isinstance(rl, dict) and ts:
+                    self.samples.append((ts, rl))
+                    p = rl.get("primary") or {}
+                    try:
+                        self.last_primary = (ts, float(p["used_percent"]), float(p.get("resets_at") or 0))
+                    except Exception:
+                        pass
+            elif inner == b"item_completed":
+                if b'"CommandExecution"' in head:
+                    try:
+                        item = (json.loads(raw.decode("utf-8", "replace")).get("payload") or {}).get("item") or {}
+                    except Exception:
+                        return
+                    res = _cmd_result(item)
+                    if res:
+                        res["ts"] = ts
+                        self.results.append(res)
+                        del self.results[:-12]
+                elif b'"Reasoning"' in head:
+                    try:
+                        item = (json.loads(raw.decode("utf-8", "replace")).get("payload") or {}).get("item") or {}
+                    except Exception:
+                        return
+                    summ = item.get("summary_text") or []
+                    if summ and isinstance(summ, list):
+                        txt = str(summ[-1]).strip().splitlines()[0] if str(summ[-1]).strip() else ""
+                        self._set_activity(ts, "think", _one_line(txt.strip("* "), 100))
+        elif outer == b"response_item":
+            if inner in (b"custom_tool_call", b"function_call"):
+                try:
+                    pl = json.loads(raw.decode("utf-8", "replace")).get("payload") or {}
+                except Exception:
+                    return
+                kind, text = describe_tool_call(
+                    pl.get("name"), pl.get("input") if inner == b"custom_tool_call" else pl.get("arguments"),
+                    pl.get("namespace"),
+                )
+                cid = str(pl.get("call_id") or pl.get("id") or len(self.pending))
+                self.pending[cid] = (ts, kind, text)
+                self.last_tool = (ts, kind, text)
+                self._set_activity(ts, kind, text)
+            elif inner in (b"custom_tool_call_output", b"function_call_output"):
+                mm = _CALL_ID_RE.search(raw[:600])
+                if mm:
+                    self.pending.pop(mm.group(1).decode("utf-8", "replace"), None)
+                if self.turn_open:
+                    self._set_activity(ts, "after", self.last_tool[2] if self.last_tool else "")
+            elif inner == b"reasoning":
+                if not self.last_activity or self.last_activity[1] != "think" or (ts or 0) - (self.last_activity[0] or 0) > 2:
+                    self._set_activity(ts, "think", "")
+            elif inner == b"message" and b'"role":"assistant"' in raw[:600]:
+                self._set_activity(ts, "reply", "")
+
+    def read_new(self, size: int, first_tail: int = MONITOR_TAIL_BYTES):
+        """Parse bytes appended since the last call (first call: the file tail)."""
+        try:
+            fh = open(self.path, "rb")
+        except OSError:
+            return
+        with fh:
+            if self.offset == 0 and size > first_tail:
+                fh.seek(size - first_tail)
+                data = fh.read(first_tail)
+                nl = data.find(b"\n")
+                data = data[nl + 1:] if nl >= 0 else b""
+                base = size - len(data)
+            else:
+                if size < self.offset:
+                    self.__init__(self.path)
+                fh.seek(self.offset)
+                data = fh.read(size - self.offset)
+                base = self.offset
+        cut = data.rfind(b"\n")
+        if cut < 0:
+            if self.offset == 0:
+                self.offset = base
+            return
+        self.offset = base + cut + 1
+        for raw in data[:cut].split(b"\n"):
+            if raw:
+                self.feed(raw)
+
+    def drain_samples(self) -> list[tuple]:
+        out, self.samples = self.samples, []
+        return out
+
+
+def read_session_meta(path: str) -> dict:
+    """First rollout line (session_meta): sub-agent / guardian-review threads carry
+    source={"subagent": ...}, thread_source (e.g. "guardian_review") and parent_thread_id."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.readline(2 * 1024 * 1024)
+        pl = json.loads(raw.decode("utf-8", "replace")).get("payload") or {}
+    except Exception:
+        return {"sub": False, "parent": None, "kind": None}
+    src = pl.get("source")
+    parent = pl.get("parent_thread_id")
+    kind = pl.get("thread_source")
+    sub = bool(parent) or (isinstance(src, dict) and "subagent" in src) or (kind not in (None, "user"))
+    return {"sub": sub, "parent": str(parent).lower() if parent else None, "kind": kind}
+
+
+def classify_task(st: RolloutState, notify: tuple | None, now: float, cfg: dict, review: float | None = None) -> dict:
+    """Status rules (documented in README):
+      waiting : turn open AND (a desktop "permission"/"question" notification for this thread is
+                not older than the newest rollout event, OR a request_user_input call is pending,
+                OR a guardian_review sub-thread of this task is mid-turn = auto-review of an
+                approval request)
+      running : turn open (task_started after the last task_complete/turn_aborted) and the last
+                event is younger than idle_minutes
+      done    : last turn completed/aborted and the last event is younger than idle_minutes
+      idle    : nothing written for idle_minutes (also: an open turn that went silent that long)
+      stuck   : flag on running/waiting-less tasks: no new event for stuck_minutes, or the last
+                stuck_repeat_count command results in this turn failed the same way
+    """
+    idle_s = max(60, int(cfg.get("idle_minutes", 30)) * 60)
+    stuck_s = max(60, int(cfg.get("stuck_minutes", 5)) * 60)
+    last = st.last_ts
+    age = (now - last) if last else None
+    open_ = st.turn_open
+    if open_ is None:  # tail had no turn boundary: a long turn is still writing, or unknown
+        open_ = age is not None and age < idle_s
+    asking = any(p[1] == "ask" for p in st.pending.values())
+    waiting_log = bool(notify and last and notify[0] >= last - 2)
+    reviewing = review is not None
+    if age is None or age >= idle_s:
+        status = "idle"
+    elif open_ and (asking or waiting_log or reviewing):
+        status = "waiting"
+    elif open_:
+        status = "running"
+    else:
+        status = "done"
+    stuck = None
+    if status == "running":
+        if age is not None and age >= stuck_s:
+            stuck = {"why": "silent", "age": age}
+        rep = detect_repeat_failures(st.results, int(cfg.get("stuck_repeat_count", 3)))
+        if rep:
+            stuck = {"why": "repeat", "age": age, **rep}
+    kind = notify[1] if waiting_log else ("question" if asking else ("review" if reviewing else None))
+    return {"status": status, "age": age, "stuck": stuck, "waiting_kind": kind if status == "waiting" else None}
+
+
+def activity_of(st: RolloutState | None, status: str | None, waiting_kind: str | None = None) -> tuple | None:
+    """(kind, text, since_ts) describing what the task is doing now."""
+    if st is None:
+        return None
+    if status == "waiting":
+        pend = max(st.pending.values(), key=lambda p: p[0] or 0) if st.pending else None
+        what = pend[2] if pend else ""
+        return ("review" if waiting_kind == "review" else "await", what, pend[0] if pend else st.last_ts)
+    if st.turn_open and st.pending:
+        ts, kind, text = max(st.pending.values(), key=lambda p: p[0] or 0)
+        return (kind, text, ts)
+    if st.last_activity:
+        ts, kind, text = st.last_activity
+        if not st.turn_open and status in ("done", "idle"):
+            last_tool = st.last_tool[2] if st.last_tool else ""
+            return ("done" if kind not in ("aborted",) else "aborted", last_tool, st.turn_ended_ts or ts)
+        return (kind, text, ts)
+    return None
+
+
+def _rl_window(rl: dict, key: str) -> tuple | None:
+    w = rl.get(key) if isinstance(rl, dict) else None
+    if not isinstance(w, dict):
+        return None
+    try:
+        used = float(w.get("used_percent"))
+    except Exception:
+        return None
+    resets = w.get("resets_at")
+    try:
+        resets = float(resets) if resets else None
+    except Exception:
+        resets = None
+    mins = w.get("window_minutes")
+    try:
+        mins = float(mins) if mins else None
+    except Exception:
+        mins = None
+    return used, resets, mins
+
+
+class QuotaForecaster:
+    """Rate-limit history (rollout token_count events + online polls) -> burn-rate forecast."""
+
+    WINDOWS = {"primary": (300, 10 * 60), "secondary": (10080, 3 * 3600)}  # minutes, min span (s)
+
+    def __init__(self):
+        self.samples = {"primary": [], "secondary": []}  # (ts, used, resets_at)
+        self.window_minutes = {"primary": 300.0, "secondary": 10080.0}
+
+    def add(self, ts: float, rl: dict):
+        for key in ("primary", "secondary"):
+            w = _rl_window(rl, key)
+            if not w or not w[1]:
+                continue
+            used, resets, mins = w
+            if mins:
+                self.window_minutes[key] = mins
+            self._insert(key, (ts, used, resets))
+
+    def add_online(self, ts: float, primary: dict | None, secondary: dict | None):
+        for key, w in (("primary", primary), ("secondary", secondary)):
+            if not isinstance(w, dict) or w.get("used_percent") is None:
+                continue
+            try:
+                used = float(w["used_percent"])
+                resets = float(w.get("reset_at") or 0) or (ts + float(w["reset_after_seconds"]))
+            except Exception:
+                continue
+            if w.get("limit_window_seconds"):
+                try:
+                    self.window_minutes[key] = float(w["limit_window_seconds"]) / 60
+                except Exception:
+                    pass
+            self._insert(key, (ts, used, resets))
+
+    def _insert(self, key: str, sample: tuple):
+        arr = self.samples[key]
+        if arr and arr[-1][0] <= sample[0]:
+            if arr[-1][1:] == sample[1:] and sample[0] - arr[-1][0] < 30:
+                return
+            arr.append(sample)
+        else:
+            bisect.insort(arr, sample)
+        cutoff = sample[0] - 8 * 86400
+        if arr and arr[0][0] < cutoff:
+            self.samples[key] = [s for s in arr if s[0] >= cutoff]
+
+    def value_before(self, key: str, ts: float, resets: float | None) -> tuple | None:
+        best = None
+        for s in self.samples[key]:
+            if s[0] > ts:
+                break
+            if resets is None or abs(s[2] - resets) <= QUOTA_RESET_TOL:
+                best = s
+        return best
+
+    def forecast(self, key: str, now: float, lookback_s: float) -> dict | None:
+        arr = self.samples.get(key) or []
+        if not arr:
+            return None
+        cur = arr[-1]
+        ts, used, resets = cur
+        win_s = self.window_minutes.get(key, 300.0) * 60
+        if resets and resets <= now:
+            return {"used": 0.0, "resets_at": None, "reset_passed": True, "rate_h": None, "eta": None, "runs_out": False, "basis": None}
+        same = [s for s in arr if abs(s[2] - resets) <= QUOTA_RESET_TOL]
+        min_span = self.WINDOWS[key][1]
+        recent = [s for s in same if s[0] >= now - lookback_s]
+        rate, basis = None, None
+        if len(recent) >= 2 and recent[-1][0] - recent[0][0] >= min_span:
+            rate = (recent[-1][1] - recent[0][1]) / (recent[-1][0] - recent[0][0])
+            basis = "recent"
+        else:
+            start = resets - win_s
+            elapsed = ts - start
+            if elapsed >= min_span:
+                rate = used / elapsed
+                basis = "window"
+        eta = None
+        if rate is not None and rate > 0:
+            eta = ts + max(0.0, 100.0 - used) / rate
+        return {
+            "used": used,
+            "sample_ts": ts,
+            "resets_at": resets,
+            "reset_passed": False,
+            "rate_h": rate * 3600 if rate is not None else None,
+            "eta": eta,
+            "runs_out": bool(eta is not None and resets and eta < resets),
+            "basis": basis,
+        }
+
+    def turns_left(self, st: RolloutState | None, now: float, max_turns: int = 5) -> dict | None:
+        """Average 5h-% per recent completed turn of a task -> turns the remaining quota allows."""
+        if st is None:
+            return None
+        cur = self.samples["primary"][-1] if self.samples["primary"] else None
+        deltas = []
+        for t in reversed(st.turns):
+            end = t.get("end")
+            if not end:
+                continue
+            start = self.value_before("primary", t["start_ts"], end[2]) or t.get("start")
+            if not start or abs(start[2] - end[2]) > QUOTA_RESET_TOL:
+                continue  # crosses a 5h reset or no reference point
+            deltas.append(max(0.0, end[1] - start[1]))
+            if len(deltas) >= max_turns:
+                break
+        if not deltas or cur is None:
+            return None
+        avg = sum(deltas) / len(deltas)
+        remain = max(0.0, 100.0 - cur[1])
+        return {"avg": avg, "n": len(deltas), "left": (remain / avg) if avg > 0 else None, "remain": remain}
+
+
+def seed_quota_samples(path: str, size: int, limit: int = QUOTA_SEED_BYTES) -> list[tuple]:
+    """(ts, rate_limits) from the tail of a rollout, cheap substring filter first."""
+    out = []
+    try:
+        with open(path, "rb") as fh:
+            start = max(0, size - limit)
+            fh.seek(start)
+            data = fh.read(size - start)
+    except OSError:
+        return out
+    for raw in data.split(b"\n"):
+        if b'"rate_limits"' not in raw or b'"token_count"' not in raw[:400]:
+            continue
+        ev = _parse_token_line(raw)
+        if ev and ev.get("rate_limits") and ev.get("ts"):
+            out.append((ev["ts"], ev["rate_limits"]))
+    return out
+
+
+class DesktopNotifyWatcher:
+    """Newest Codex desktop 'permission'/'question' notification per thread, from its logs."""
+
+    def __init__(self, logs_dir: Path = CODEX_LOGS_DIR):
+        self.logs_dir = Path(logs_dir)
+        self._files: dict[str, int] = {}
+        self.latest: dict[str, tuple] = {}  # thread id -> (ts, kind)
+        self._helper = SelectedThreadTracker(logs_dir)
+
+    def _parse(self, data: bytes):
+        for m in _LOG_NOTIFY_RE.finditer(data):
+            ids = _UUID_RE.findall(m.group(1).decode("utf-8", "replace"))
+            if not ids:
+                continue
+            line_start = data.rfind(b"\n", 0, m.start()) + 1
+            ts = _parse_iso_utc(data[line_start:line_start + 30].split(b" ", 1)[0].decode("ascii", "replace"))
+            if ts:
+                tid = ids[0].lower()
+                if tid not in self.latest or ts >= self.latest[tid][0]:
+                    self.latest[tid] = (ts, m.group(2).decode())
+
+    def poll(self) -> dict[str, tuple]:
+        for p in self._helper._log_files():
+            try:
+                size = os.stat(p).st_size
+            except OSError:
+                continue
+            off = self._files.get(p)
+            if off is None:
+                off = max(0, size - 2 * 1024 * 1024)  # first sight: recent tail only
+            if size < off:
+                off = 0
+            if size > off:
+                try:
+                    with open(p, "rb") as fh:
+                        fh.seek(off)
+                        data = fh.read(size - off)
+                except OSError:
+                    continue
+                cut = data.rfind(b"\n")
+                if cut < 0:
+                    self._files[p] = off
+                    continue
+                self._parse(data[:cut])
+                off += cut + 1
+            self._files[p] = off
+        return self.latest
+
+
+class TaskMonitor:
+    """Recently active tasks with status + activity; quota forecast; alert transitions.
+
+    Runs on the HUD's local worker thread. Rollouts are listed at most every
+    MONITOR_RESCAN_SEC; tracked files are parsed incrementally (first sight: tail only).
+    """
+
+    def __init__(self, reader: "TaskUsageReader", logs_dir: Path | None = CODEX_LOGS_DIR):
+        self.reader = reader
+        self.notify_watch = DesktopNotifyWatcher(logs_dir) if logs_dir else None
+        self.states: dict[str, RolloutState] = {}
+        self.forecaster = QuotaForecaster()
+        self._scan_at = 0.0
+        self._files: list[tuple[str, float]] = []
+        self._seeded: set[str] = set()
+        self._prev: dict[str, dict] = {}
+        self._primed = False
+        self._meta: dict[str, dict] = {}
+        self._tail_ts: dict[str, tuple] = {}
+
+    def _rescan(self, cfg: dict):
+        files = self.reader._list_rollouts()
+        now = time.time()
+        horizon = max(float(cfg.get("task_list_hours", 6)), QUOTA_SEED_HOURS) * 3600
+        by_mtime = sorted(files, key=lambda x: x[1], reverse=True)
+        recent = [(p, mt) for p, mt in by_mtime[:40] if now - mt <= horizon]
+        # NTFS may report a stale mtime for files Codex keeps open: add newest-by-name too.
+        by_name = sorted(files, key=lambda x: os.path.basename(x[0]), reverse=True)[:8]
+        seen = {p for p, _ in recent}
+        recent += [(p, mt) for p, mt in by_name if p not in seen]
+        self._files = recent
+        self._scan_at = time.monotonic()
+
+    def poll(self, cfg: dict, selected_path: str | None) -> dict:
+        now = time.time()
+        if not self._files or time.monotonic() - self._scan_at >= MONITOR_RESCAN_SEC:
+            self._rescan(cfg)
+        hours = float(cfg.get("task_list_hours", 6)) * 3600
+        max_n = int(cfg.get("task_list_max", 5))
+        acts = []
+        for p, _mt in self._files:
+            try:
+                st_ = os.stat(p)
+            except OSError:
+                continue
+            act = st_.st_mtime
+            state = self.states.get(p)
+            if state is not None and state.last_ts:
+                act = max(act, state.last_ts)
+            else:
+                # NTFS keeps a stale mtime while Codex holds the file open: use the newest
+                # line timestamp in the tail (cached per size/mtime).
+                sig = (st_.st_size, st_.st_mtime)
+                cached = self._tail_ts.get(p)
+                if cached is None or cached[0] != sig:
+                    cached = (sig, self.reader._tail_timestamp(p, st_.st_size) or 0.0)
+                    self._tail_ts[p] = cached
+                act = max(act, cached[1])
+            acts.append((act, p, st_.st_size))
+        acts.sort(reverse=True)
+        idle_s = max(60, int(cfg.get("idle_minutes", 30)) * 60)
+        show_sub = bool(cfg.get("task_list_show_subagents", False))
+        recent = [x for x in acts if now - x[0] <= hours]
+        for _a, p, _s in recent:
+            if p not in self._meta:
+                self._meta[p] = read_session_meta(p)
+        listed = [x for x in recent if show_sub or not self._meta[x[1]]["sub"]][:max_n]
+        listed_paths = {p for _, p, _ in listed}
+        # Active guardian-review / sub-agent threads: tracked (not listed) to mark their parent.
+        subs = [x for x in recent if self._meta[x[1]]["sub"] and now - x[0] <= idle_s and x[1] not in listed_paths][:8]
+        tracked = listed + subs
+        paths = {p for _, p, _ in tracked}
+        if selected_path and selected_path not in paths:
+            try:
+                tracked.append((-1.0, selected_path, os.stat(selected_path).st_size))
+            except OSError:
+                pass
+        keep = {p for _, p, _ in tracked}
+        # Quota history: rate_limits from other rollouts active in the last 24h (tail, once).
+        for a, p, size in acts:
+            if p in self._seeded or p in keep:
+                continue
+            self._seeded.add(p)
+            if now - a <= QUOTA_SEED_HOURS * 3600:
+                for ts, rl in seed_quota_samples(p, size):
+                    self.forecaster.add(ts, rl)
+        for _a, p, size in tracked:
+            self._seeded.add(p)
+            state = self.states.get(p)
+            if state is None:
+                state = self.states[p] = RolloutState(p)
+            if size != state.offset:
+                state.read_new(size)
+            for ts, rl in state.drain_samples():
+                self.forecaster.add(ts, rl)
+        for p in list(self.states):
+            if p not in keep:
+                self.states.pop(p, None)
+        notify = {}
+        if self.notify_watch is not None:
+            try:
+                notify = self.notify_watch.poll()
+            except Exception:
+                notify = {}
+        reviews: dict[str, float] = {}  # parent thread id -> guardian review activity ts
+        for _a, p, _size in subs:
+            meta = self._meta.get(p) or {}
+            state = self.states.get(p)
+            if meta.get("kind") == "guardian_review" and meta.get("parent") and state is not None:
+                if state.turn_open and state.last_ts and now - state.last_ts < idle_s:
+                    reviews[meta["parent"]] = state.last_ts
+        tasks = []
+        for a, p, _size in tracked:
+            state = self.states.get(p)
+            if state is None or (p not in listed_paths and p != selected_path):
+                continue
+            m = _ROLLOUT_RE.search(os.path.basename(p))
+            tid = m.group(2).lower() if m else None
+            info = classify_task(state, notify.get(tid) if tid else None, now, cfg, reviews.get(tid) if tid else None)
+            info.update(
+                {
+                    "id": tid,
+                    "path": p,
+                    "title": self.reader._title_for(m.group(2) if m else None),
+                    "activity": activity_of(state, info["status"], info.get("waiting_kind")),
+                    "selected": p == selected_path,
+                    "listed": p in listed_paths,
+                    "sub": bool((self._meta.get(p) or {}).get("sub")),
+                }
+            )
+            tasks.append(info)
+        events = self._transitions(tasks, cfg)
+        sel_state = self.states.get(selected_path) if selected_path else None
+        lookback = max(10, int(cfg.get("forecast_lookback_min", 60))) * 60
+        forecast = {
+            "primary": self.forecaster.forecast("primary", now, lookback),
+            "secondary": self.forecaster.forecast("secondary", now, 24 * 3600),
+            "turns": self.forecaster.turns_left(sel_state, now),
+        }
+        return {"tasks": tasks, "events": events, "forecast": forecast, "at": now}
+
+    def _transitions(self, tasks: list[dict], cfg: dict) -> list[dict]:
+        """Alert events vs the previous poll (the first poll only sets the baseline)."""
+        events = []
+        cur = {}
+        for t in tasks:
+            tid = t.get("id")
+            if not tid:
+                continue
+            prev = self._prev.get(tid)
+            stuck_key = None
+            if t.get("stuck"):
+                stuck_key = t["stuck"]["why"]
+            user_wait = t["status"] == "waiting" and t.get("waiting_kind") in ("permission", "question")
+            cur[tid] = {"status": t["status"], "stuck": stuck_key, "user_wait": user_wait}
+            if not self._primed or prev is None:
+                continue
+            if user_wait and not prev.get("user_wait"):
+                events.append({"kind": "approval", "task": t})
+            if t["status"] == "done" and prev["status"] in ("running", "waiting"):
+                events.append({"kind": "complete", "task": t})
+            if stuck_key and prev.get("stuck") != stuck_key:
+                events.append({"kind": "stuck", "task": t})
+        self._prev.update(cur)
+        self._primed = True
+        return events
+
+
+def show_windows_toast(title: str, body: str, timeout: float = 20.0) -> tuple[bool, str]:
+    """Dependency-free Windows toast: WinRT ToastNotificationManager via powershell.exe.
+
+    Uses Windows PowerShell's registered AppUserModelID so no shortcut/registration is
+    needed. Blocking (~1 s); call from a worker thread. Returns (ok, error text).
+    """
+    import base64
+    import subprocess
+
+    def esc(s: str) -> str:
+        return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+    xml = (
+        '<toast><visual><binding template="ToastGeneric"><text>%s</text><text>%s</text>'
+        "</binding></visual></toast>" % (esc(title), esc(body))
+    )
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime]|Out-Null;"
+        "[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime]|Out-Null;"
+        "$x=New-Object Windows.Data.Xml.Dom.XmlDocument;"
+        "$x.LoadXml([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('%s')));"
+        "$t=[Windows.UI.Notifications.ToastNotification]::new($x);"
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('%s').Show($t)"
+    ) % (base64.b64encode(xml.encode("utf-8")).decode(), TOAST_AUMID)
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    try:
+        r = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
+            capture_output=True,
+            timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+        )
+    except Exception as e:
+        return False, str(e)
+    if r.returncode != 0:
+        return False, r.stderr.decode("utf-8", "replace").strip()[:300]
+    return True, ""
+
+
+def open_codex_thread(tid: str) -> bool:
+    """Open a thread in the Codex desktop app via its registered codex:// protocol
+    (MSIX windows.protocol; the app routes codex://threads/<id> to the local conversation)."""
+    if not tid or not _UUID_RE.fullmatch(tid):
+        return False
+    try:
+        os.startfile(f"codex://threads/{tid}")  # type: ignore[attr-defined]
+        return True
+    except Exception:
+        return False
+
+
 def _focus_existing_hwnd(hwnd: int) -> bool:
     user32 = ctypes.windll.user32
     if not hwnd or not user32.IsWindow(hwnd):
@@ -1292,6 +2283,8 @@ class Hud(tk.Tk):
             pass
 
         self._stop = threading.Event()
+        self._local_wake = threading.Event()  # task-list click: poll local files right away
+        self._toast_error = None
         self._lock = threading.Lock()
         self._msg = "BOOT"
         self._data = None
@@ -1304,6 +2297,10 @@ class Hud(tk.Tk):
         self._task = None  # latest TaskUsageReader snapshot
         self._task_polling = False
         self._mini_tokens = None  # capsule task text: None = hidden, "—" = no data
+        self._monitor = TaskMonitor(self._task_reader)
+        self._mon_lock = threading.Lock()  # TaskMonitor state: worker thread + online feed
+        self._mon = None  # latest TaskMonitor.poll() result
+        self._notify_last: dict = {}  # (task id, kind) -> time.time() of the last notification
 
         self._font_title = tkfont.Font(family="Consolas", size=13, weight="bold")
         self._font_mono = tkfont.Font(family="Consolas", size=9)
@@ -1379,12 +2376,36 @@ class Hud(tk.Tk):
         self.card5 = self._card(self.t("card5"))
         self.card7 = self._card(self.t("card7"))
         self.task_card = self._task_card()
+        # Quota forecast: one line inside each window card (detail mode), between text and meter.
+        for card in (self.card5, self.card7):
+            card["fc"] = tk.Label(card["wrap"], text="", fg=MUTED, bg=PANEL, font=self._font_mono, anchor="w")
+        self.tasks_sec = self._section("sec_tasks", "section_tasks_open")
+        self.task_rows = []
+        for i in range(10):
+            row = tk.Frame(self.tasks_sec["body"], bg=PANEL, cursor="hand2")
+            tag = tk.Label(row, text="", fg=MUTED, bg=PANEL, font=self._font_tiny, width=7, anchor="w", cursor="hand2")
+            tag.pack(side="left")
+            age = tk.Label(row, text="", fg=MUTED, bg=PANEL, font=self._font_tiny, anchor="e", cursor="hand2")
+            age.pack(side="right")
+            title = tk.Label(row, text="", fg=TEXT, bg=PANEL, font=self._font_tiny, anchor="w", cursor="hand2")
+            title.pack(side="left", fill="x", expand=True)
+            for w in (row, tag, title, age):
+                w.bind("<Button-1>", lambda e, i=i: self._task_row_click(i, False))
+                w.bind("<Button-3>", lambda e, i=i: self._task_row_click(i, True))
+                w.bind("<Enter>", lambda e, r=row: self._row_hover(r, True))
+                w.bind("<Leave>", lambda e, r=row: self._row_hover(r, False))
+            self.task_rows.append({"row": row, "tag": tag, "title": title, "age": age, "task": None})
+        self.tasks_empty = tk.Label(self.tasks_sec["body"], text="", fg=MUTED, bg=PANEL, font=self._font_mono, anchor="w")
+        # Compact mode: one status line (task counts / alerts / quota warning), hidden when empty.
+        self.compact_status = tk.Label(
+            self, text="", fg=AMBER, bg=BG, font=self._font_mono, anchor="w", justify="left"
+        )
 
-        extra = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
-        self.extra_wrap = extra
-        extra.pack(fill="both", expand=True, padx=14, pady=8)
-        self.extra_body = tk.Frame(extra, bg=PANEL)
-        self.extra_body.pack(fill="both", expand=True, padx=10, pady=8)
+        # Account / credits rows: collapsible (collapsed by default to keep detail mode short).
+        self.extra_sec = self._section("sec_account", "section_account_open")
+        self.extra_wrap = self.extra_sec["wrap"]
+        self.extra_wrap.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        self.extra_body = self.extra_sec["body"]
         self.extra_rows = []
         for _ in range(6):
             row = tk.Frame(self.extra_body, bg=PANEL)
@@ -1480,12 +2501,47 @@ class Hud(tk.Tk):
         meter.pack(fill="x", padx=10, pady=(6, 10))
         return {"wrap": wrap, "title": title_l, "pct": pct, "detail": detail, "meter": meter}
 
+    def _section(self, title_key: str, cfg_key: str):
+        """Collapsible panel: clicking the header toggles the body (state kept in config)."""
+        wrap = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        head = tk.Frame(wrap, bg=PANEL, cursor="hand2")
+        head.pack(fill="x", padx=10, pady=(6, 6))
+        title = tk.Label(head, text="", fg=MUTED, bg=PANEL, font=self._font_tiny, cursor="hand2")
+        title.pack(side="left")
+        summary = tk.Label(head, text="", fg=TEXT, bg=PANEL, font=self._font_tiny, anchor="e", cursor="hand2")
+        summary.pack(side="right")
+        body = tk.Frame(wrap, bg=PANEL)
+        sec = {"wrap": wrap, "head": head, "title": title, "summary": summary, "body": body,
+               "key": title_key, "cfg": cfg_key}
+        for w in (head, title, summary):
+            w.bind("<Button-1>", lambda e, s=sec: self._toggle_section(s))
+        self._sync_section(sec)
+        return sec
+
+    def _sync_section(self, sec):
+        is_open = bool(self._cfg.get(sec["cfg"], True))
+        arrow = "▾" if is_open else "▸"
+        sec["title"].configure(text=f"{arrow} {self.t(sec['key'])}", font=self._tiny_label_font())
+        if is_open:
+            sec["head"].pack_configure(pady=(5, 1))
+            sec["body"].pack(fill="x", padx=10, pady=(0, 6))
+        else:
+            sec["head"].pack_configure(pady=(5, 5))
+            sec["body"].pack_forget()
+
+    def _toggle_section(self, sec):
+        self._cfg[sec["cfg"]] = not bool(self._cfg.get(sec["cfg"], True))
+        save_ui_config(self._cfg)
+        self._sync_section(sec)
+        self._fit_window()
+
     def _task_card(self):
         card = self._card(self.t("task_card"))
         wrap = card["wrap"]
-        # Extra lines sit between the headline detail and the context meter.
+        # Extra lines sit between the headline detail and the context meter:
+        # [0] tokens [1] cache [2] cost [3] ctx/age [4] live activity [5] alert (packed only when set)
         lines = []
-        for _ in range(4):
+        for _ in range(6):
             lab = tk.Label(wrap, text="", fg=TEXT, bg=PANEL, font=self._font_mono, anchor="w")
             lines.append(lab)
         card["lines"] = lines
@@ -1538,6 +2594,16 @@ class Hud(tk.Tk):
             card["detail"].configure(font=self._label_font())
         for lab in self.task_card["lines"]:
             lab.configure(font=self._label_font())
+        for sec in (self.tasks_sec, self.extra_sec):
+            self._sync_section(sec)
+            sec["summary"].configure(font=self._tiny_label_font())
+        for card in (self.card5, self.card7):
+            card["fc"].configure(font=self._label_font())
+        for row in self.task_rows:
+            row["tag"].configure(font=self._tiny_label_font())
+            row["title"].configure(font=self._tiny_label_font())
+        self.tasks_empty.configure(font=self._label_font())
+        self.compact_status.configure(font=self._label_font())
         for lab, val in self.extra_rows:
             lab.configure(font=self._label_font(), width=12)
             val.configure(font=self._font_mono)
@@ -1581,13 +2647,26 @@ class Hud(tk.Tk):
                 snap = self._task_reader.poll()
             except Exception:
                 snap = None
+            mon = None
+            try:
+                with self._mon_lock:
+                    mon = self._monitor.poll(self._cfg, (snap or {}).get("path"))
+            except Exception:
+                mon = None
             with self._lock:
                 self._task = snap
+                self._mon = mon
+            if mon and mon.get("events"):
+                try:
+                    self._dispatch_events(mon["events"])
+                except Exception:
+                    pass
             try:
                 self.after(0, self._paint_task)
             except Exception:
                 return
-            self._stop.wait(self.current_local_refresh_sec())
+            self._local_wake.wait(self.current_local_refresh_sec())
+            self._local_wake.clear()
 
     def _task_age_text(self, snap: dict | None) -> str:
         ts = (snap or {}).get("updated_ts")
@@ -1676,6 +2755,7 @@ class Hud(tk.Tk):
                 )
             card["meter"].set_value(pct)
             tokens_mini = _fmt_tokens(view["total"])
+        self._paint_monitor()
         if not self._cfg.get("mini_task_tokens", True):
             new_mini = None
         else:
@@ -1684,6 +2764,297 @@ class Hud(tk.Tk):
             self._mini_tokens = new_mini
             if self.is_mini():
                 self._redraw_capsule()
+
+    # -- task monitor UI -------------------------------------------------
+    @staticmethod
+    def _clip(text: str, cols: int) -> str:
+        """Truncate to a display width (CJK counts double) so labels never widen the window."""
+        text = str(text or "")
+        width, out = 0, []
+        for ch in text:
+            w = 2 if ord(ch) > 0x2E7F else 1
+            if width + w > cols:
+                return "".join(out).rstrip() + "…"
+            out.append(ch)
+            width += w
+        return text
+
+    def _clock(self, ts: float | None) -> str:
+        """HH:MM today, weekday + HH:MM within 6 days, else MM-DD HH:MM (local time)."""
+        if not ts:
+            return "--"
+        dt = datetime.fromtimestamp(ts)
+        days = (dt.date() - datetime.now().date()).days
+        if days == 0:
+            return dt.strftime("%H:%M")
+        if 0 < days <= 6:
+            wd = ("周一", "周二", "周三", "周四", "周五", "周六", "周日") if self.lang() == "zh" else (
+                "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+            return f"{wd[dt.weekday()]} {dt.strftime('%H:%M')}"
+        return dt.strftime("%m-%d %H:%M")
+
+    def _task_name(self, task: dict | None) -> str:
+        if not task:
+            return "?"
+        title = (task.get("title") or "").strip()
+        return title or f"#{(task.get('id') or '?')[-8:]}"
+
+    def _activity_text(self, act) -> str:
+        prefix = self.t("act_prefix")
+        if not act:
+            return self._clip(self.t("act_line", prefix=prefix, what="—", age="").rstrip(), 54)
+        kind, text, ts = act
+        what = self.t("act_" + kind, text=_one_line(text, 120)).strip()
+        age = _fmt_age(time.time() - ts, self.lang()) if ts else ""
+        age_w = len(age) + 4
+        return self.t("act_line", prefix=prefix, what=self._clip(what, 54 - age_w - len(prefix)), age=age).rstrip()
+
+    def _alert(self, tasks: list, sel: dict | None):
+        """Most important alert: selected task first, then any stuck task, then any waiting."""
+        ordered = ([sel] if sel else []) + [t for t in tasks if t is not sel]
+        for t in ordered:
+            st = t.get("stuck")
+            if st and st.get("why") == "repeat":
+                return self.t("alert_repeat", n=st.get("count"), cmd=_one_line(st.get("cmd"), 80)), RED
+            if st:
+                return self.t("alert_silent", age=_fmt_age(st.get("age"), self.lang()), title=self._task_name(t)), AMBER
+        for t in ordered:
+            if t.get("status") == "waiting" and t.get("waiting_kind") != "review":
+                return self.t("alert_waiting", title=self._task_name(t)), AMBER
+        return None
+
+    def _fc_text(self, key: str, fc: dict | None):
+        """Forecast line for a window card: burn rate -> time of 100% vs the card's reset."""
+        if not fc or fc.get("rate_h") is None and not fc.get("reset_passed"):
+            return self.t("fc_na"), MUTED
+        if fc.get("reset_passed"):
+            return self.t("fc_reset"), MUTED
+        rate = self.t("rate_h", v=fc["rate_h"]) if key == "primary" else self.t("rate_d", v=fc["rate_h"] * 24)
+        basis = self.t("fc_basis_window") if fc.get("basis") == "window" else ""
+        if fc.get("eta") is None:
+            return self.t("fc_flat"), MUTED
+        eta = self._clock(fc["eta"])
+        if fc.get("runs_out"):
+            soon = fc["eta"] - time.time() < 3600
+            return self.t("fc_runs_out", rate=rate, basis=basis, eta=eta), (RED if soon else AMBER)
+        return self.t("fc_ok", rate=rate, basis=basis, eta=eta), MUTED
+
+    def _turns_text(self, turns: dict | None) -> str:
+        """Suffix for the 5h forecast line: turns of the shown task the remaining 5h quota allows."""
+        if not turns:
+            return ""
+        if turns.get("left") is None:
+            return self.t("fc_turns_inf")
+        left = turns["left"]
+        left_txt = "999+" if left >= 999 else f"{left:.0f}"
+        return self.t("fc_turns", left=left_txt, avg=turns["avg"], n=turns["n"])
+
+    def _status_counts(self, tasks: list) -> str:
+        cnt = {"running": 0, "waiting": 0, "stuck": 0}
+        for t in tasks:
+            if t.get("stuck"):
+                cnt["stuck"] += 1
+            elif t.get("status") in cnt:
+                cnt[t["status"]] += 1
+        parts = [self.t("cnt_" + k, n=v) for k, v in cnt.items() if v]
+        return " · ".join(parts)
+
+    def _paint_monitor(self):
+        if not hasattr(self, "tasks_sec"):
+            return
+        with self._lock:
+            mon = self._mon
+            snap = self._task
+        mode = self.mode()
+        font = self._label_font()
+        tasks = (mon or {}).get("tasks") or []
+        max_n = int(self._cfg.get("task_list_max", 5))
+        listed = [t for t in tasks if t.get("listed")][:max_n]
+        sel = next((t for t in tasks if t.get("selected")), None)
+        card = self.task_card
+        act = sel.get("activity") if sel else None
+        self._act_cache = act
+        alert = self._alert(listed + ([sel] if sel and sel not in listed else []), sel)
+        fc = (mon or {}).get("forecast") or {}
+        fc_on = bool(self._cfg.get("forecast_enabled", True))
+        # detail: activity + alert lines in the task card
+        if mode == "detail":
+            status = (sel or {}).get("status")
+            color = CYAN if status == "running" else AMBER if status == "waiting" else MUTED
+            card["lines"][4].configure(text=self._activity_text(act) if snap else "", fg=color, font=font)
+            lab = card["lines"][5]
+            if alert:
+                lab.configure(text=self._clip(alert[0], 54), fg=alert[1], font=font)
+                if not lab.winfo_ismapped():
+                    lab.pack(fill="x", padx=10, before=card["meter"])
+            else:
+                lab.configure(text="")
+                if lab.winfo_ismapped():
+                    lab.pack_forget()
+            # forecast: one line per window card (+ turns estimate on the 5h card)
+            for key, card_ in (("primary", self.card5), ("secondary", self.card7)):
+                txt, col = self._fc_text(key, fc.get(key))
+                if key == "primary":
+                    txt += self._turns_text(fc.get("turns"))
+                card_["fc"].configure(text=self._clip(txt, 56), fg=col, font=font)
+            # task list section
+            if not getattr(self, "_rows_hover", False):
+                self.tasks_sec["summary"].configure(
+                    text=self._status_counts(listed), font=self._tiny_label_font(),
+                    fg=AMBER if any(t.get("stuck") or t.get("status") == "waiting" for t in listed) else TEXT)
+            shown = 0
+            for i, row in enumerate(self.task_rows):
+                t = listed[i] if i < len(listed) else None
+                row["task"] = t
+                if t is None:
+                    continue
+                shown += 1
+                key = "stuck" if t.get("stuck") else t.get("status", "idle")
+                tag_col = {"running": CYAN, "waiting": AMBER, "stuck": RED, "done": CYAN_DIM}.get(key, MUTED)
+                row["tag"].configure(text=self.t("st_" + key), fg=tag_col, font=self._tiny_label_font())
+                name = ("▶ " if t.get("selected") else "") + self._task_name(t)
+                row["title"].configure(text=self._clip(name, 44), fg=CYAN if t.get("selected") else TEXT,
+                                       font=self._tiny_label_font())
+                row["age"].configure(text=_fmt_age(t.get("age"), self.lang()), font=self._font_tiny)
+            if getattr(self, "_rows_shown", None) != shown:
+                for row in self.task_rows:
+                    row["row"].pack_forget()
+                for row in self.task_rows[:shown]:
+                    row["row"].pack(fill="x", pady=0)
+                self.tasks_empty.pack_forget()
+                self._rows_shown = shown
+            if shown == 0:
+                self.tasks_empty.configure(text=self.t("tasks_none", h=self._cfg.get("task_list_hours", 6)), font=font)
+                if not self.tasks_empty.winfo_ismapped():
+                    self.tasks_empty.pack(fill="x")
+            elif self.tasks_empty.winfo_ismapped():
+                self.tasks_empty.pack_forget()
+            sig = (shown, bool(alert))
+            if sig != getattr(self, "_detail_sig", None):
+                self._detail_sig = sig
+                self._fit_window()
+        # compact: a single short status line only when there is something to say
+        if mode == "compact":
+            lines = []
+            if self._cfg.get("task_list_enabled", True):
+                counts = self._status_counts(listed)
+                if counts:
+                    lines.append(counts)
+            if alert:
+                lines.append(self._clip(alert[0], 46))
+            if fc_on:
+                for k in ("primary", "secondary"):
+                    f = fc.get(k) or {}
+                    if f.get("runs_out"):
+                        lines.append(self.t("fc_warn_compact", win=self.t("win5" if k == "primary" else "win7"),
+                                            eta=self._clock(f.get("eta")), reset=self._clock(f.get("resets_at"))))
+            text = "\n".join(lines)
+            color = RED if alert and alert[1] == RED else AMBER if (alert or len(lines) > (1 if listed else 0)) else MUTED
+            self.compact_status.configure(text=text, fg=color, font=font)
+            if text and not self.compact_status.winfo_ismapped():
+                self.compact_status.pack(fill="x", padx=16, pady=(0, 2), after=self.task_card["wrap"])
+                self._fit_window()
+            elif not text and self.compact_status.winfo_ismapped():
+                self.compact_status.pack_forget()
+                self._fit_window()
+            elif text != getattr(self, "_compact_status_prev", ""):
+                self._fit_window()
+            self._compact_status_prev = text
+
+    def _row_hover(self, row, on: bool):
+        bg = PANEL2 if on else PANEL
+        row.configure(bg=bg)
+        for w in row.winfo_children():
+            w.configure(bg=bg)
+        # The click hint lives in the section header while hovering (saves a line).
+        self._rows_hover = on
+        if on:
+            hint = "tasks_hint" if self._cfg.get("task_click_action") == "open" else "tasks_hint_select"
+            self.tasks_sec["summary"].configure(text=self.t(hint), fg=MUTED)
+        else:
+            self._paint_monitor()
+
+    def _task_row_click(self, i: int, select_only: bool):
+        t = self.task_rows[i]["task"] if i < len(self.task_rows) else None
+        if not t or not t.get("id"):
+            return
+        self._task_reader.set_override(t["id"])
+        if not select_only and self._cfg.get("task_click_action") == "open":
+            open_codex_thread(t["id"])
+        self._local_wake.set()
+
+    # -- notifications -----------------------------------------------------
+    def _dispatch_events(self, events: list):
+        """Worker thread: debounce alert transitions and fire notifications."""
+        cfg = self._cfg
+        if not cfg.get("notify_enabled", True) or cfg.get("notify_method") == "off":
+            return
+        now = time.time()
+        cool = int(cfg.get("notify_cooldown_min", 10)) * 60
+        toggles = {"stuck": "notify_stuck", "approval": "notify_approval", "complete": "notify_complete"}
+        for ev in events:
+            kind = ev.get("kind")
+            task = ev.get("task") or {}
+            if not cfg.get(toggles.get(kind, ""), False):
+                continue
+            key = (task.get("id"), kind)
+            if now - self._notify_last.get(key, 0) < cool:
+                continue
+            self._notify_last[key] = now
+            title, body = self._event_message(ev)
+            self._notify(title, body)
+
+    def _event_message(self, ev: dict) -> tuple[str, str]:
+        task = ev.get("task") or {}
+        name = self._task_name(task)
+        kind = ev.get("kind")
+        if kind == "stuck":
+            st = task.get("stuck") or {}
+            if st.get("why") == "repeat":
+                body = self.t("n_stuck_repeat", title=name, n=st.get("count"), cmd=_one_line(st.get("cmd"), 100))
+            else:
+                body = self.t("n_stuck_silent", title=name, age=_fmt_age(st.get("age"), self.lang()))
+            return self.t("n_stuck_title"), body
+        if kind == "approval":
+            return self.t("n_approval_title"), self.t("n_approval_body", title=name)
+        return self.t("n_complete_title"), self.t("n_complete_body", title=name)
+
+    def _notify(self, title: str, body: str):
+        if self._cfg.get("notify_method") == "popup":
+            self.after(0, self._popup, title, body)
+            return
+
+        def work():
+            ok, err = show_windows_toast(title, body)
+            self._toast_error = None if ok else err
+            if not ok:
+                try:
+                    self.after(0, self._popup, title, body)
+                except Exception:
+                    pass
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _popup(self, title: str, body: str, ms: int = 10000):
+        """Fallback notification: small topmost window in the screen's bottom-right corner."""
+        try:
+            top = tk.Toplevel(self)
+            top.overrideredirect(True)
+            top.attributes("-topmost", True)
+            top.configure(bg=PANEL, highlightbackground=AMBER, highlightthickness=1)
+            tk.Label(top, text=title, fg=AMBER, bg=PANEL, font=self._label_font(), anchor="w").pack(fill="x", padx=12, pady=(10, 2))
+            tk.Label(top, text=self._clip(body, 60), fg=TEXT, bg=PANEL, font=self._label_font(), anchor="w",
+                     justify="left").pack(fill="x", padx=12, pady=(0, 10))
+            top.update_idletasks()
+            w, h = top.winfo_reqwidth(), top.winfo_reqheight()
+            x = top.winfo_screenwidth() - w - 24
+            y = top.winfo_screenheight() - h - 72
+            top.geometry(f"+{x}+{y}")
+            for wdg in [top] + list(top.winfo_children()):
+                wdg.bind("<Button-1>", lambda e: top.destroy())
+            top.after(ms, top.destroy)
+        except Exception:
+            pass
 
     @staticmethod
     def _cost_total_text(cost: dict | None) -> str:
@@ -1706,9 +3077,11 @@ class Hud(tk.Tk):
         )
 
     def _tick_task_age(self):
-        """Cheap per-pulse refresh of the 'updated N ago' text."""
+        """Cheap per-pulse refresh of the 'updated N ago' / activity age texts."""
         if self.is_compact() or self.is_mini() or not hasattr(self, "task_card"):
             return
+        if getattr(self, "_act_cache", None):
+            self.task_card["lines"][4].configure(text=self._activity_text(self._act_cache))
         with self._lock:
             snap = self._task
         view = task_view(snap)
@@ -1745,6 +3118,13 @@ class Hud(tk.Tk):
             with self._lock:
                 self._msg = msg
                 self._data = data
+            if msg == "ok" and isinstance(data, dict):
+                try:
+                    s = summarize(data)
+                    with self._mon_lock:
+                        self._monitor.forecaster.add_online(time.time(), s.get("primary"), s.get("secondary"))
+                except Exception:
+                    pass
             self.after(0, self._paint)
 
         threading.Thread(target=work, daemon=True).start()
@@ -2317,6 +3697,8 @@ class Hud(tk.Tk):
             self.card5["wrap"].pack_forget()
             self.card7["wrap"].pack_forget()
             self.task_card["wrap"].pack_forget()
+            for w in (self.tasks_sec["wrap"], self.compact_status):
+                w.pack_forget()
             if hasattr(self, "compact_bar"):
                 self.compact_bar.pack_forget()
             self._ensure_mini_bar()
@@ -2374,6 +3756,7 @@ class Hud(tk.Tk):
             self.card5["wrap"].pack(fill="x", padx=14, pady=(2, 4))
             self.card7["wrap"].pack(fill="x", padx=14, pady=(2, 4))
             self.task_card["wrap"].pack(fill="x", padx=14, pady=(2, 4))
+            self.tasks_sec["wrap"].pack_forget()
             self.compact_bar.pack(fill="x", padx=14, pady=(4, 10))
             self.minsize(300, 200)
             self.maxsize(560, 480)
@@ -2385,11 +3768,17 @@ class Hud(tk.Tk):
             self.task_card["title"].configure(text=self.t("task_card"))
             self.maxsize(1400, 1200)
             self.minsize(420, 400)
-            self.meta.pack(fill="x", padx=14)
             self.card5["wrap"].pack(fill="x", padx=14, pady=6)
+            # before= keeps the account line under the header after compact -> detail
+            self.meta.pack(fill="x", padx=14, before=self.card5["wrap"])
             self.card7["wrap"].pack(fill="x", padx=14, pady=6)
             self.task_card["wrap"].pack(fill="x", padx=14, pady=6)
-            self.extra_wrap.pack(fill="both", expand=True, padx=14, pady=8)
+            self.compact_status.pack_forget()
+            if self._cfg.get("task_list_enabled", True):
+                self.tasks_sec["wrap"].pack(fill="x", padx=14, pady=(0, 6), after=self.task_card["wrap"])
+            else:
+                self.tasks_sec["wrap"].pack_forget()
+            self.extra_wrap.pack(fill="both", expand=True, padx=14, pady=(0, 8))
             self.ctrl.pack(fill="x", padx=14, pady=(0, 6))
             self.btns.pack(fill="x", padx=14, pady=(0, 12))
             self.mode_btn.configure(text=self.t("compact"))
@@ -2400,12 +3789,17 @@ class Hud(tk.Tk):
             card["meter"].pack_configure(pady=pad)
             # show meter/detail again if leaving mini
             card["detail"].pack(fill="x", padx=10)
-            for lab in card.get("lines", ()):
-                if compact:
+            for idx, lab in enumerate(card.get("lines", ())):
+                if compact or idx == 5:  # [5] = alert line, packed by _paint_monitor when set
                     lab.pack_forget()
                 else:
                     lab.pack(fill="x", padx=10, before=card["meter"])
             card["meter"].pack(fill="x", padx=10, pady=pad)
+            if "fc" in card:
+                if compact or not self._cfg.get("forecast_enabled", True):
+                    card["fc"].pack_forget()
+                else:
+                    card["fc"].pack(fill="x", padx=10, before=card["meter"])
         self._paint_task()
         self._fit_window()
 
@@ -2445,6 +3839,7 @@ class Hud(tk.Tk):
 
     def on_close(self):
         self._stop.set()
+        self._local_wake.set()
         try:
             HWND_PATH.unlink(missing_ok=True)
         except Exception:
