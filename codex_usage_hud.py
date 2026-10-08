@@ -32,7 +32,10 @@ HWND_PATH = Path.home() / ".codex_usage_hud.hwnd"
 SESSIONS_DIR = CODEX_HOME / "sessions"
 SESSION_INDEX_PATH = CODEX_HOME / "session_index.jsonl"
 ARCHIVED_SESSIONS_DIR = CODEX_HOME / "archived_sessions"
-CODEX_LOGS_DIR = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "Codex" / "Logs"
+LOCALAPPDATA_DIR = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+# Classic (unpackaged) desktop install. The Microsoft Store / MSIX build writes the same tree
+# under its package LocalCache instead; codex_log_roots() finds both.
+CODEX_LOGS_DIR = LOCALAPPDATA_DIR / "Codex" / "Logs"
 SINGLETON_MUTEX = "Local\\CodexUsageHud.SingleInstance"
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_PAGE = "https://chatgpt.com/codex/settings/usage"
@@ -62,7 +65,8 @@ ROLLOUT_CANDIDATES = 6  # newest-by-mtime + newest-by-name rollouts to watch
 ROLLOUT_TAIL_CHUNK = 256 * 1024
 ROLLOUT_TAIL_LIMIT = 32 * 1024 * 1024  # max bytes scanned backwards per task switch
 ROLLOUT_ID_RESCAN_SEC = 3  # min gap between full rescans when a selected id has no rollout yet
-LOG_DAY_DIRS = 2  # newest Codex desktop log day folders to watch
+LOG_DAY_DIRS = 2  # newest Codex desktop log day folders to watch (per log root)
+LOG_ROOTS_RESCAN_SEC = 60  # re-detect Codex desktop log folders (install / update / reinstall)
 LOG_TAIL_LIMIT = 16 * 1024 * 1024  # max bytes scanned backwards per log file on first sight
 LOG_HISTORY_LIMIT = 24 * 1024 * 1024  # per log file, once: "last viewed" times for the task list
 ROLLOUT_FULL_SCAN_LIMIT = 512 * 1024 * 1024  # bigger rollouts: usage from the tail only, cost unknown
@@ -642,6 +646,46 @@ def _parse_token_line(raw: bytes) -> dict | None:
     }
 
 
+def codex_log_roots() -> list[Path]:
+    """Codex desktop log folders on this machine.
+
+    Precedence: CODEX_HUD_LOGS_DIR env var (os.pathsep-separated), then "codex_logs_dir"
+    in the HUD config (string or list). Otherwise auto-detect the classic install
+    (%LOCALAPPDATA%\\Codex\\Logs) and every OpenAI MSIX package
+    (%LOCALAPPDATA%\\Packages\\OpenAI.*\\LocalCache\\Local\\Codex\\Logs). This HUD runs outside
+    the package, so MSIX file-system redirection does not apply to it and the package
+    path has to be read directly.
+    """
+    manual: list[str] = []
+    env = os.environ.get("CODEX_HUD_LOGS_DIR", "").strip()
+    if env:
+        manual = [x for x in env.split(os.pathsep) if x.strip()]
+    else:
+        try:
+            v = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("codex_logs_dir")
+        except (OSError, ValueError, AttributeError):
+            v = None
+        if isinstance(v, str) and v.strip():
+            manual = [v]
+        elif isinstance(v, list):
+            manual = [x for x in v if isinstance(x, str) and x.strip()]
+    if manual:
+        return [Path(os.path.expandvars(os.path.expanduser(x.strip()))) for x in manual]
+    roots: list[Path] = []
+    if CODEX_LOGS_DIR.is_dir():
+        roots.append(CODEX_LOGS_DIR)
+    try:
+        with os.scandir(LOCALAPPDATA_DIR / "Packages") as it:
+            for e in it:
+                if e.is_dir() and e.name.lower().startswith("openai."):
+                    d = Path(e.path) / "LocalCache" / "Local" / "Codex" / "Logs"
+                    if d.is_dir():
+                        roots.append(d)
+    except OSError:
+        pass
+    return roots
+
+
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _LOG_ROUTE_RE = re.compile(rb"ownerRoutePath=(\S*)")
 _LOG_VIEW_RE = re.compile(rb"thread_stream_view_activity_changed active=true conversationId=(\S+)")
@@ -692,8 +736,11 @@ class SelectedThreadTracker:
     stale sizes/mtimes for files Codex keeps open, so sizes come from os.stat().
     """
 
-    def __init__(self, logs_dir: Path = CODEX_LOGS_DIR):
-        self.logs_dir = Path(logs_dir)
+    def __init__(self, logs_dir: Path | None = None):
+        # logs_dir pins one folder; None = auto-detect (codex_log_roots), re-checked periodically.
+        self._fixed = [Path(logs_dir)] if logs_dir else None
+        self._roots: list[Path] = []
+        self._roots_at = float("-inf")
         self._files: dict[str, dict] = {}  # path -> {"offset": int, "event": (ts, id) | None}
         self._primed = False
         # thread id -> epoch of the last time it was opened in the Codex UI (all watched logs)
@@ -720,6 +767,15 @@ class SelectedThreadTracker:
             b = data.find(b"\n", m.end())
             self._note(_parse_selection_line(data[a : b if b >= 0 else len(data)]))
 
+    def roots(self) -> list[Path]:
+        if self._fixed is not None:
+            return self._fixed
+        now = time.monotonic()
+        if now - self._roots_at >= LOG_ROOTS_RESCAN_SEC:
+            self._roots_at = now
+            self._roots = codex_log_roots()
+        return self._roots
+
     def _day_dirs(self) -> list[str]:
         out = []
 
@@ -731,12 +787,19 @@ class SelectedThreadTracker:
             except OSError:
                 return []
 
-        for y in _sub(str(self.logs_dir)):
-            for m in _sub(y):
-                for d in _sub(m):
-                    out.append(d)
-                    if len(out) >= LOG_DAY_DIRS:
-                        return out
+        for root in self.roots():
+            n = 0
+            for y in _sub(str(root)):
+                for m in _sub(y):
+                    for d in _sub(m):
+                        out.append(d)
+                        n += 1
+                        if n >= LOG_DAY_DIRS:
+                            break
+                    if n >= LOG_DAY_DIRS:
+                        break
+                if n >= LOG_DAY_DIRS:
+                    break
         return out
 
     def _log_files(self) -> list[str]:
@@ -859,13 +922,13 @@ class TaskUsageReader:
         self,
         sessions_dir: Path = SESSIONS_DIR,
         index_path: Path = SESSION_INDEX_PATH,
-        logs_dir: Path | None = CODEX_LOGS_DIR,
+        logs_dir: Path | str | None = "auto",
         archived_dir: Path | None = ARCHIVED_SESSIONS_DIR,
     ):
         self.sessions_dir = Path(sessions_dir)
         self.index_path = Path(index_path)
         self.archived_dir = Path(archived_dir) if archived_dir else None
-        self.selector = SelectedThreadTracker(logs_dir) if logs_dir else None
+        self.selector = SelectedThreadTracker(None if logs_dir == "auto" else logs_dir) if logs_dir else None
         self.follow_selected = True
         # (thread id, selection event seen at click time): a task picked in the HUD task list.
         # Cleared by the next newer Codex UI navigation (when following the Codex selection).
@@ -1933,8 +1996,7 @@ def seed_quota_samples(path: str, size: int, limit: int = QUOTA_SEED_BYTES) -> l
 class DesktopNotifyWatcher:
     """Newest Codex desktop 'permission'/'question' notification per thread, from its logs."""
 
-    def __init__(self, logs_dir: Path = CODEX_LOGS_DIR):
-        self.logs_dir = Path(logs_dir)
+    def __init__(self, logs_dir: Path | None = None):
         self._files: dict[str, int] = {}
         self.latest: dict[str, tuple] = {}  # thread id -> (ts, kind)
         self._helper = SelectedThreadTracker(logs_dir)
@@ -1986,9 +2048,9 @@ class TaskMonitor:
     MONITOR_RESCAN_SEC; tracked files are parsed incrementally (first sight: tail only).
     """
 
-    def __init__(self, reader: "TaskUsageReader", logs_dir: Path | None = CODEX_LOGS_DIR):
+    def __init__(self, reader: "TaskUsageReader", logs_dir: Path | str | None = "auto"):
         self.reader = reader
-        self.notify_watch = DesktopNotifyWatcher(logs_dir) if logs_dir else None
+        self.notify_watch = DesktopNotifyWatcher(None if logs_dir == "auto" else logs_dir) if logs_dir else None
         self.states: dict[str, RolloutState] = {}
         self.forecaster = QuotaForecaster()
         self._scan_at = 0.0

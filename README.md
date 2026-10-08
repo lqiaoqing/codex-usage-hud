@@ -55,7 +55,7 @@ pythonw codex_usage_hud.py
 
 “当前任务”怎么定：
 
-1. **跟随桌面端选中的任务**：读 Codex 桌面端日志 `%LOCALAPPDATA%\Codex\Logs\YYYY\MM\DD\codex-desktop-*.log`，找最近一次切换对话留下的记录（`ownerRoutePath=/local/<任务 id>`，以及 `thread_stream_view_activity_changed active=true conversationId=<任务 id>`），再按 id 找到 `~/.codex/sessions/**/rollout-*-<任务 id>.jsonl`。在桌面端点到别的任务，下一次本地刷新（默认 4 秒内）就会切过去，只是查看、没发消息也行。
+1. **跟随桌面端选中的任务**：读 Codex 桌面端日志 `%LOCALAPPDATA%\Codex\Logs\YYYY\MM\DD\codex-desktop-*.log`（应用商店 / MSIX 版在 `%LOCALAPPDATA%\Packages\OpenAI.Codex_*\LocalCache\Local\Codex\Logs\`，两种都会自动识别），找最近一次切换对话留下的记录（`ownerRoutePath=/local/<任务 id>`，以及 `thread_stream_view_activity_changed active=true conversationId=<任务 id>`），再按 id 找到 `~/.codex/sessions/**/rollout-*-<任务 id>.jsonl`。在桌面端点到别的任务，下一次本地刷新（默认 4 秒内）就会切过去，只是查看、没发消息也行。
 2. **兜底：最近写入的任务**：日志里找不到、当前页面不是某个任务（比如新对话页），或者这个任务还没有 rollout 文件时，用 `~/.codex/sessions/` 下最近有写入的 `rollout-*.jsonl`。
 
 选中的任务如果还没有 `token_count`，卡片只显示任务名和“暂无 token 数据”，不会沿用上一个任务的数字。
@@ -203,6 +203,7 @@ gpt-5.6-sol 是官方标注的促销价（至少到 2026-11-21）。价格会变
 - `local_refresh_sec`：本地任务 token 的读取间隔，1–60 秒，默认 4，和联网同步互不影响
 - `mini_task_tokens`：迷你胶囊是否显示当前任务总 token，默认 `true`（旧键名 `mini_task_ctx` 仍然认，保存配置时会改写成新键名）
 - `task_follow_selected`：当前任务是否跟随桌面端选中的对话，默认 `true`；设为 `false` 则只看最近写入的 rollout
+- `codex_logs_dir`：桌面端日志目录，字符串或字符串列表，默认不填，自动识别普通安装版和应用商店版的日志目录；自动识别不到时再手动指定。也可以用环境变量 `CODEX_HUD_LOGS_DIR` 指定（多个用 `;` 分隔），优先级最高
 - `forecast_enabled`：5H / 7D 卡片里的额度预测行，默认 `true`
 - `forecast_lookback_min`：5H 消耗速度看最近多少分钟，10–300，默认 60
 - `task_list_enabled`：详细模式的任务一览，默认 `true`
@@ -234,7 +235,7 @@ Codex 要两边都有剩余额度才能继续用：5h 和 7d 任一打满都会�
 
 - `~/.codex/sessions/**/rollout-*.jsonl` 里 `type=event_msg`、`payload.type=token_count` 的行（`info.total_token_usage`、`info.last_token_usage`、`info.model_context_window`）
 - `~/.codex/session_index.jsonl` 里的 `thread_name`
-- `%LOCALAPPDATA%\Codex\Logs\` 下桌面端日志里的对话切换记录（只读，用来判断当前选中的任务）和 `kind=permission|question` 的通知记录（判断“待批准”）
+- `%LOCALAPPDATA%\Codex\Logs\`（应用商店版为 `%LOCALAPPDATA%\Packages\OpenAI.Codex_*\LocalCache\Local\Codex\Logs\`）下桌面端日志里的对话切换记录（只读，用来判断当前选中的任务）和 `kind=permission|question` 的通知记录（判断“待批准”）
 - rollout 里的 `task_started` / `task_complete` / `turn_aborted`、`custom_tool_call` / `function_call` 及其输出、`item_completed`（命令结果、推理摘要）和 `token_count.rate_limits`（任务状态、当前动作、卡住判定、额度预测）
 - 打开任务用 `codex://threads/<id>`，只是让系统把链接交给 Codex 桌面端
 
