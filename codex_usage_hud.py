@@ -7,6 +7,8 @@ import json
 import math
 import os
 import re
+import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -39,6 +41,8 @@ CODEX_LOGS_DIR = LOCALAPPDATA_DIR / "Codex" / "Logs"
 SINGLETON_MUTEX = "Local\\CodexUsageHud.SingleInstance"
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 USAGE_PAGE = "https://chatgpt.com/codex/settings/usage"
+# Local HTTP proxies to try when Windows system proxy is off but a proxy tool is running.
+LOCAL_PROXY_PORTS = (7897, 7890, 10809, 1087)
 
 BG = "#05070a"
 PANEL = "#0b1018"
@@ -436,6 +440,92 @@ def _save_auth(data: dict) -> None:
         pass
 
 
+def _windows_system_proxy_on() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as key:
+            return int(winreg.QueryValueEx(key, "ProxyEnable")[0]) == 1
+    except OSError:
+        return False
+
+
+def _tcp_open(host: str, port: int, timeout: float = 0.35) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _proxy_from_codex_env() -> str | None:
+    """HTTP(S) proxy from ~/.codex/.env; socks lines are ignored (urllib has no SOCKS)."""
+    try:
+        text = (Path.home() / ".codex" / ".env").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        found[k.strip().lower()] = v.strip().strip(chr(34) + chr(39))
+    for key in ("https_proxy", "http_proxy", "all_proxy"):
+        v = found.get(key, "")
+        if v and not v.lower().startswith("socks"):
+            return v
+    return None
+
+
+def resolve_http_proxy() -> str | None:
+    """Proxy URL for ChatGPT / OpenAI HTTPS, or None to use urllib defaults.
+
+    Order: CODEX_HUD_PROXY env, config "proxy", HTTP(S)_PROXY env, ~/.codex/.env,
+    then (only when Windows system proxy is off) the first listening local port in
+    LOCAL_PROXY_PORTS. Set config proxy to "" to force direct / system-only.
+    """
+    env = (os.environ.get("CODEX_HUD_PROXY") or "").strip()
+    if env:
+        return env
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    if isinstance(cfg, dict) and "proxy" in cfg:
+        v = cfg.get("proxy")
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        if isinstance(v, str):
+            return v.strip()
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+        v = (os.environ.get(key) or "").strip()
+        if v and not v.lower().startswith("socks"):
+            return v
+    from_env = _proxy_from_codex_env()
+    if from_env:
+        return from_env
+    if _windows_system_proxy_on():
+        return None
+    for port in LOCAL_PROXY_PORTS:
+        if _tcp_open("127.0.0.1", port):
+            return f"http://127.0.0.1:{port}"
+    return None
+
+
+def _urlopen(req: urllib.request.Request, timeout: float):
+    proxy = resolve_http_proxy()
+    if proxy:
+        handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        return urllib.request.build_opener(handler).open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 def _refresh_chatgpt_token(auth: dict) -> str | None:
     tokens = auth.get("tokens") or {}
     refresh = tokens.get("refresh_token")
@@ -457,7 +547,7 @@ def _refresh_chatgpt_token(auth: dict) -> str | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with _urlopen(req, timeout=20) as resp:
             payload = json.loads(resp.read().decode("utf-8", "replace"))
         at = payload.get("access_token")
         if at:
@@ -500,7 +590,7 @@ def fetch_usage() -> tuple[str, dict | None]:
                 "originator": "codex-cli",
             },
         )
-        with urllib.request.urlopen(req, timeout=25) as resp:
+        with _urlopen(req, timeout=25) as resp:
             return json.loads(resp.read().decode("utf-8", "replace"))
 
     try:

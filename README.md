@@ -204,6 +204,7 @@ gpt-5.6-sol 是官方标注的促销价（至少到 2026-11-21）。价格会变
 - `mini_task_tokens`：迷你胶囊是否显示当前任务总 token，默认 `true`（旧键名 `mini_task_ctx` 仍然认，保存配置时会改写成新键名）
 - `task_follow_selected`：当前任务是否跟随桌面端选中的对话，默认 `true`；设为 `false` 则只看最近写入的 rollout
 - `codex_logs_dir`：桌面端日志目录，字符串或字符串列表，默认不填，自动识别普通安装版和应用商店版的日志目录；自动识别不到时再手动指定。也可以用环境变量 `CODEX_HUD_LOGS_DIR` 指定（多个用 `;` 分隔），优先级最高
+- `proxy`：拉额度时用的 HTTP 代理，例如 `http://127.0.0.1:7897`。默认不填：优先环境变量 `CODEX_HUD_PROXY` / `HTTP(S)_PROXY`，再读 `~/.codex/.env`；若 Windows「设置 → 代理」没开，但本机 `7897`/`7890`/`10809`/`1087` 有监听，会自动走那个端口。写成空字符串 `""` 则强制不套一层本机代理（仍可能走系统代理）。
 - `forecast_enabled`：5H / 7D 卡片里的额度预测行，默认 `true`
 - `forecast_lookback_min`：5H 消耗速度看最近多少分钟，10–300，默认 60
 - `task_list_enabled`：详细模式的任务一览，默认 `true`
