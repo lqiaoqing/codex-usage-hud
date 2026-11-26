@@ -1,5 +1,7 @@
 # Codex Usage HUD
 
+同一个窗口可切换 **Codex** 和 **Antigravity**。顶部共用三种显示模式、置顶、打开用量页和立即刷新。查看 [Antigravity 使用说明](antigravity-hud/README.md)。
+
 Windows 桌面小窗，用来盯 Codex / ChatGPT 的 **5 小时** 和 **7 天** 额度。数字和 `codex /status`、chatgpt.com 用量页同一套接口。
 
 另外会读本机 Codex 会话记录，显示**当前任务**（Codex 桌面端里正打开的那个对话）用了多少 token、上下文占了多少、此刻在做什么，列出最近活跃的任务及其状态，预测额度什么时候用完，任务疑似卡住或等你批准时弹通知。这部分纯本地、只读，不联网。
@@ -32,11 +34,11 @@ pythonw codex_usage_hud.py
 | --- | --- |
 | 详细 `detail` | 账号 / 套餐、5H / 7D 进度条和额度预测、当前任务 token / API 估价 / 当前动作、任务一览（可折叠）、账户积分（可折叠）、刷新间隔、置顶、同步、打开用量页 |
 | 简洁 `compact` | 5H / 7D 额度、当前任务总 token、上下文占比和 API 估价、同步按钮；有情况时多一行状态（任务计数、卡住提醒、额度会在重置前用完的警告） |
-| 迷你 `mini` | 胶囊条：5H / 7D 百分比 + 当前任务总 token + 展开 |
+| 迷你 `mini` | 胶囊条：可选 Codex、Antigravity 或两项的 5H / 7D 剩余额度 |
 
 详细面板用 COMPACT / 简洁 切布局，简洁面板用 DETAIL / 详细切回来。切换会按内容改窗口大小。
 
-详细/简洁里点 MINI / 迷你可缩成胶囊；点胶囊或 EXPAND / 展开回到上一布局。标题栏右侧可切换 EN / 中文，默认英文。中文界面用微软雅黑。语言会写进配置。
+详细或简洁模式中点「迷你」可缩成胶囊。点击胶囊右侧的设置图标可勾选展示项目，至少保留一项。选两项时上下两行显示。点击数字区可展开回原标签。顶部可切换 EN / 中文，默认英文。
 
 额度颜色：正常青色，≥70% 琥珀色，≥90% 红色。
 
@@ -51,7 +53,7 @@ pythonw codex_usage_hud.py
 - 上下文：最近一轮的输入 token ÷ 模型上下文窗口，进度条颜色规则同上
 - 距离 Codex 上一次写入 token 统计过了多久
 
-数字格式如 `2.78M`、`19.4K`。简洁模式只显示总计和上下文；迷你胶囊多一段 `TOK` / `总量`，即当前任务的总 token（`total_tokens`，不套用百分比颜色，没数据时显示 `—`；可用 `mini_task_tokens` 关掉）。
+数字格式如 `2.78M`、`19.4K`。简洁模式只显示总计和上下文。
 
 “当前任务”怎么定：
 
@@ -171,7 +173,7 @@ gpt-5.6-sol 是官方标注的促销价（至少到 2026-11-21）。价格会变
   "mode": "detail",
   "lang": "en",
   "local_refresh_sec": 4,
-  "mini_task_tokens": true,
+  "mini_providers": ["codex", "antigravity"],
   "task_follow_selected": true,
   "forecast_enabled": true,
   "forecast_lookback_min": 60,
@@ -201,7 +203,7 @@ gpt-5.6-sol 是官方标注的促销价（至少到 2026-11-21）。价格会变
 - `expand_mode`：从迷你展开时回到 `compact` 或 `detail`
 - `lang`：`en`（默认）或 `zh`
 - `local_refresh_sec`：本地任务 token 的读取间隔，1–60 秒，默认 4，和联网同步互不影响
-- `mini_task_tokens`：迷你胶囊是否显示当前任务总 token，默认 `true`（旧键名 `mini_task_ctx` 仍然认，保存配置时会改写成新键名）
+- `mini_providers` 记录迷你胶囊选择的工具。第一次进入迷你模式时默认选中当时的标签。
 - `task_follow_selected`：当前任务是否跟随桌面端选中的对话，默认 `true`；设为 `false` 则只看最近写入的 rollout
 - `codex_logs_dir`：桌面端日志目录，字符串或字符串列表，默认不填，自动识别普通安装版和应用商店版的日志目录；自动识别不到时再手动指定。也可以用环境变量 `CODEX_HUD_LOGS_DIR` 指定（多个用 `;` 分隔），优先级最高
 - `proxy`：拉额度时用的 HTTP 代理，例如 `http://127.0.0.1:7897`。默认不填：优先环境变量 `CODEX_HUD_PROXY` / `HTTP(S)_PROXY`，再读 `~/.codex/.env`；若 Windows「设置 → 代理」没开，但本机 `7897`/`7890`/`10809`/`1087` 有监听，会自动走那个端口。写成空字符串 `""` 则强制不套一层本机代理（仍可能走系统代理）。

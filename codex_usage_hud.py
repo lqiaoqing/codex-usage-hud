@@ -1,6 +1,8 @@
 """Codex Usage HUD — geek-styled always-on-top widget for 5h / 7d quotas."""
 from __future__ import annotations
 
+from antigravity_panel import AntigravityPanel
+
 import bisect
 import ctypes
 import json
@@ -156,7 +158,6 @@ STRINGS = {
         "task_cost_line": "API EST ≈ {total}   IN {inp}  CACHED {cached}  OUT {out}",
         "task_cost_unknown": "API EST —   no API price for {models}",
         "task_cost_na": "API EST —",
-        "mini_tokens": "TOK",
         "sec_tasks": "TASKS  //  RECENT",
         "sec_account": "ACCOUNT  //  CREDITS",
         "win5": "5H",
@@ -269,7 +270,6 @@ STRINGS = {
         "task_cost_line": "API 估价 ≈ {total}   输入 {inp}  缓存 {cached}  输出 {out}",
         "task_cost_unknown": "API 估价 —   {models} 无公开 API 价格",
         "task_cost_na": "API 估价 —",
-        "mini_tokens": "总量",
         "sec_tasks": "任务一览",
         "sec_account": "账户  //  积分",
         "win5": "5小时",
@@ -390,9 +390,8 @@ def load_ui_config() -> dict:
     except Exception:
         local_sec = DEFAULT_LOCAL_REFRESH_SEC
     data["local_refresh_sec"] = max(MIN_LOCAL_REFRESH_SEC, min(MAX_LOCAL_REFRESH_SEC, local_sec))
-    # Mini capsule task section (total tokens). `mini_task_ctx` is the legacy name, still honored.
-    legacy = data.pop("mini_task_ctx", True)
-    data["mini_task_tokens"] = bool(data.get("mini_task_tokens", legacy))
+    data.pop("mini_task_ctx", None)
+    data.pop("mini_task_tokens", None)
     data["task_follow_selected"] = bool(data.get("task_follow_selected", True))
     # Task monitor / forecast / alerts (feat/task-monitor).
     for key, default, lo, hi in MONITOR_INT_KEYS:
@@ -2488,7 +2487,7 @@ class Hud(tk.Tk):
         self.configure(bg=BG)
         self.attributes("-topmost", bool(self._cfg.get("topmost", True)))
         try:
-            self.attributes("-alpha", 0.97)
+            self.attributes("-alpha", 1.0)
         except Exception:
             pass
 
@@ -2506,7 +2505,6 @@ class Hud(tk.Tk):
         self._prices = merged_model_prices(self._cfg)
         self._task = None  # latest TaskUsageReader snapshot
         self._task_polling = False
-        self._mini_tokens = None  # capsule task text: None = hidden, "—" = no data
         self._monitor = TaskMonitor(self._task_reader)
         self._mon_lock = threading.Lock()  # TaskMonitor state: worker thread + online feed
         self._mon = None  # latest TaskMonitor.poll() result
@@ -2517,7 +2515,7 @@ class Hud(tk.Tk):
         self._font_big = tkfont.Font(family="Consolas", size=20, weight="bold")
         self._font_tiny = tkfont.Font(family="Consolas", size=8)
         self._apply_fonts()
-        self.title(self.t("window_title"))
+        self.title("用量监测" if self.lang() == "zh" else "Usage HUD")
 
         self._build()
         self.after(200, self._publish_hwnd)
@@ -2559,7 +2557,11 @@ class Hud(tk.Tk):
             self._font_cjk_tiny.configure(family=cjk, size=8)
 
     def _build(self):
-        header = tk.Frame(self, bg=BG)
+        self.active_tab = ("antigravity" if self._cfg.get("active_tab") == "antigravity" else "codex")
+        self.codex_page = tk.Frame(self, bg=BG)
+        self.toolbar = tk.Frame(self, bg=BG)
+        self.tabs = tk.Frame(self, bg=PANEL)
+        header = tk.Frame(self.codex_page, bg=BG)
         header.pack(fill="x", padx=14, pady=(12, 6))
         self.brand = tk.Label(header, text=self.t("brand"), fg=CYAN, bg=BG, font=self._font_title)
         self.brand.pack(side="left")
@@ -2580,7 +2582,7 @@ class Hud(tk.Tk):
         )
         self.hdr_status.pack(side="left", padx=(8, 0))
 
-        self.meta = tk.Label(self, text=self.t("boot"), fg=MUTED, bg=BG, font=self._font_mono, anchor="w", justify="left")
+        self.meta = tk.Label(self.codex_page, text=self.t("boot"), fg=MUTED, bg=BG, font=self._font_mono, anchor="w", justify="left")
         self.meta.pack(fill="x", padx=14)
 
         self.card5 = self._card(self.t("card5"))
@@ -2608,7 +2610,7 @@ class Hud(tk.Tk):
         self.tasks_empty = tk.Label(self.tasks_sec["body"], text="", fg=MUTED, bg=PANEL, font=self._font_mono, anchor="w")
         # Compact mode: one status line (task counts / alerts / quota warning), hidden when empty.
         self.compact_status = tk.Label(
-            self, text="", fg=AMBER, bg=BG, font=self._font_mono, anchor="w", justify="left"
+            self.codex_page, text="", fg=AMBER, bg=BG, font=self._font_mono, anchor="w", justify="left"
         )
 
         # Account / credits rows: collapsible (collapsed by default to keep detail mode short).
@@ -2626,10 +2628,9 @@ class Hud(tk.Tk):
             val.pack(side="left", fill="x", expand=True)
             self.extra_rows.append((lab, val))
 
-        ctrl = tk.Frame(self, bg=BG)
-        self.ctrl = ctrl
-        ctrl.pack(fill="x", padx=14, pady=(0, 6))
-        self.refresh_label = tk.Label(ctrl, text=self.t("refresh_label"), fg=MUTED, bg=BG, font=self._font_tiny)
+        ctrl = tk.Frame(self.tabs, bg=PANEL)
+        ctrl.pack(side="right")
+        self.refresh_label = tk.Label(ctrl, text=self.t("refresh_label"), fg=MUTED, bg=PANEL, font=self._tiny_label_font())
         self.refresh_label.pack(side="left")
         self.refresh_var = tk.StringVar(value=str(self._cfg["refresh_sec"]))
         entry = tk.Entry(
@@ -2651,7 +2652,7 @@ class Hud(tk.Tk):
         self.apply_btn.pack(side="left", padx=4)
         self.topmost_var = tk.BooleanVar(value=bool(self._cfg.get("topmost", True)))
         self.pin_btn = tk.Checkbutton(
-            ctrl,
+            self.toolbar,
             text=self.t("pin"),
             variable=self.topmost_var,
             command=self._toggle_topmost,
@@ -2662,20 +2663,62 @@ class Hud(tk.Tk):
             activeforeground=CYAN,
             font=self._font_tiny,
         )
-        self.pin_btn.pack(side="right")
+        self.pin_btn.pack(in_=self.toolbar, side="right", padx=(4, 0))
 
-        btns = tk.Frame(self, bg=BG)
-        self.btns = btns
-        btns.pack(fill="x", padx=14, pady=(0, 12))
-        self.sync_btn = self._btn(btns, self.t("sync_now"), self.refresh_now)
-        self.sync_btn.pack(side="left")
-        self.open_btn = self._btn(btns, self.t("open_usage"), lambda: webbrowser.open(USAGE_PAGE))
-        self.open_btn.pack(side="left", padx=8)
-        self.mode_btn = self._btn(btns, self.t("compact"), self.toggle_mode)
-        self.mode_btn.pack(side="right")
-        self.mini_btn = self._btn(btns, self.t("mini"), self.enter_mini)
-        self.mini_btn.pack(side="right", padx=(0, 8))
+        self.lang_btn.pack_forget()
+        self.lang_btn = self._btn(self.toolbar, self.t("lang_switch"), self.toggle_lang)
+        self.lang_btn.pack(side="right")
+        self.sync_btn = self._btn(self.toolbar, self.t("sync_now"), lambda: self._active_action("refresh"))
+        self.sync_btn.pack(side="right", padx=3)
+        self.open_btn = self._btn(self.toolbar, "用量页", lambda: self._active_action("open"))
+        self.open_btn.configure(text="打开用量页" if self.lang() == "zh" else "USAGE")
+        self.open_btn.pack(side="right", padx=3)
+        self.detail_btn = self._btn(self.toolbar, self.t("detail"), lambda: self._choose_mode("detail"))
+        self.detail_btn.pack(side="left")
+        self.mode_btn = self._btn(self.toolbar, self.t("compact"), lambda: self._choose_mode("compact"))
+        self.mode_btn.pack(side="left", padx=2)
+        self.mini_btn = self._btn(self.toolbar, self.t("mini"), self.enter_mini)
+        self.mini_btn.pack(side="left")
+        for control in (self.lang_btn, self.sync_btn, self.open_btn, self.detail_btn, self.mode_btn, self.mini_btn):
+            control.configure(font=self._label_font(), fg=TEXT, padx=8, pady=4, borderwidth=0,
+                              highlightthickness=0)
+        self.sync_btn.configure(bg=CYAN, fg="#0c2824")
+        self.sync_btn.configure(text="立即刷新" if self.lang() == "zh" else "REFRESH")
+        self.tab_buttons = {}
+        for key, label in (("codex", "Codex"), ("antigravity", "Antigravity")):
+            slot = tk.Frame(self.tabs, bg=PANEL)
+            slot.pack(side="left", padx=(0, 8))
+            button = self._btn(slot, label, lambda tab=key: self._select_tab(tab))
+            button.configure(font=("Segoe UI", 10, "bold"), highlightthickness=0, borderwidth=0, pady=6)
+            button.pack(fill="x")
+            button.underline = tk.Frame(slot, bg=PANEL, height=2)
+            button.underline.pack(fill="x")
+            self.tab_buttons[key] = button
+        self.antigravity = AntigravityPanel(self, resolve_http_proxy)
+        self.bind("<Control-Tab>", lambda e: self._select_tab("antigravity" if self.active_tab == "codex" else "codex"))
+        self.apply_mode()
 
+    def _active_action(self, action):
+        if self.active_tab == "antigravity":
+            self.antigravity.poll(action)
+        elif action == "refresh":
+            self.refresh_now()
+        else:
+            webbrowser.open(USAGE_PAGE)
+
+    def _select_tab(self, tab):
+        if self.is_mini():
+            return
+        self.active_tab = tab
+        self._cfg["active_tab"] = tab
+        save_ui_config(self._cfg)
+        self.apply_mode()
+        if tab == "antigravity" and time.monotonic() >= self.antigravity.next_refresh:
+            self.antigravity.poll()
+
+    def _choose_mode(self, mode):
+        self._cfg["mode"] = self._cfg["expand_mode"] = mode
+        save_ui_config(self._cfg)
         self.apply_mode()
 
     def _btn(self, parent, text, cmd):
@@ -2697,7 +2740,7 @@ class Hud(tk.Tk):
         )
 
     def _card(self, title: str):
-        wrap = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        wrap = tk.Frame(self.codex_page, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
         wrap.pack(fill="x", padx=14, pady=6)
         head = tk.Frame(wrap, bg=PANEL)
         head.pack(fill="x", padx=10, pady=(8, 2))
@@ -2713,7 +2756,7 @@ class Hud(tk.Tk):
 
     def _section(self, title_key: str, cfg_key: str):
         """Collapsible panel: clicking the header toggles the body (state kept in config)."""
-        wrap = tk.Frame(self, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
+        wrap = tk.Frame(self.codex_page, bg=PANEL, highlightbackground=LINE, highlightthickness=1)
         head = tk.Frame(wrap, bg=PANEL, cursor="hand2")
         head.pack(fill="x", padx=10, pady=(6, 6))
         title = tk.Label(head, text="", fg=MUTED, bg=PANEL, font=self._font_tiny, cursor="hand2")
@@ -2760,18 +2803,19 @@ class Hud(tk.Tk):
         return card
 
     def current_refresh_sec(self) -> int:
-        try:
-            sec = int(str(self.refresh_var.get()).strip())
-        except Exception:
-            sec = self._cfg.get("refresh_sec", DEFAULT_REFRESH_SEC)
-        return max(MIN_REFRESH_SEC, min(MAX_REFRESH_SEC, sec))
+        return int(self._cfg.get("refresh_sec", DEFAULT_REFRESH_SEC))
 
     def apply_refresh(self):
-        sec = self.current_refresh_sec()
+        try:
+            sec = int(str(self.refresh_var.get()).strip())
+        except ValueError:
+            sec = self.current_refresh_sec()
+        sec = max(MIN_REFRESH_SEC, min(MAX_REFRESH_SEC, sec))
         self.refresh_var.set(str(sec))
         self._cfg["refresh_sec"] = sec
         save_ui_config(self._cfg)
         self._next_due = time.monotonic() + sec
+        self.antigravity.set_refresh_interval(sec)
         self.hdr_status.configure(text=self.t("interval", sec=sec))
 
     def _toggle_topmost(self):
@@ -2787,14 +2831,15 @@ class Hud(tk.Tk):
 
     def apply_lang(self):
         self._apply_fonts()
-        self.title(self.t("window_title"))
+        self.title("用量监测" if self.lang() == "zh" else "Usage HUD")
         self.brand.configure(text=self.t("brand"), font=self._font_title)
         self.lang_btn.configure(text=self.t("lang_switch"), font=self._font_tiny, width=4)
         self.refresh_label.configure(text=self.t("refresh_label"), font=self._tiny_label_font())
         self.apply_btn.configure(text=self.t("apply"), font=self._font_tiny)
         self.pin_btn.configure(text=self.t("pin"), font=self._tiny_label_font())
-        self.sync_btn.configure(text=self.t("sync_now"), font=self._font_tiny)
-        self.open_btn.configure(text=self.t("open_usage"), font=self._font_tiny)
+        self.sync_btn.configure(text="立即刷新" if self.lang() == "zh" else "REFRESH", font=self._label_font())
+        self.open_btn.configure(text="打开用量页" if self.lang() == "zh" else "USAGE", font=self._label_font())
+        self.detail_btn.configure(text=self.t("detail"))
         self.mode_btn.configure(font=self._font_tiny)
         self.hdr_status.configure(font=self._font_tiny)
         self.meta.configure(font=self._label_font())
@@ -2920,7 +2965,6 @@ class Hud(tk.Tk):
                 for lab in card["lines"]:
                     lab.configure(text="")
             card["meter"].set_value(0)
-            tokens_mini = None
         else:
             pct = view["ctx_pct"]
             card["pct"].configure(text=f"{pct:5.1f}%", fg=self._pct_color(pct))
@@ -2964,16 +3008,7 @@ class Hud(tk.Tk):
                     font=font,
                 )
             card["meter"].set_value(pct)
-            tokens_mini = _fmt_tokens(view["total"])
         self._paint_monitor()
-        if not self._cfg.get("mini_task_tokens", True):
-            new_mini = None
-        else:
-            new_mini = tokens_mini or "—"
-        if new_mini != self._mini_tokens:
-            self._mini_tokens = new_mini
-            if self.is_mini():
-                self._redraw_capsule()
 
     # -- task monitor UI -------------------------------------------------
     @staticmethod
@@ -3146,7 +3181,8 @@ class Hud(tk.Tk):
             sig = (shown, bool(alert))
             if sig != getattr(self, "_detail_sig", None):
                 self._detail_sig = sig
-                self._fit_window()
+                if self.active_tab == "codex":
+                    self._fit_window()
         # compact: a single short status line only when there is something to say
         if mode == "compact":
             lines = []
@@ -3165,14 +3201,17 @@ class Hud(tk.Tk):
             text = "\n".join(lines)
             color = RED if alert and alert[1] == RED else AMBER if (alert or len(lines) > (1 if listed else 0)) else MUTED
             self.compact_status.configure(text=text, fg=color, font=font)
-            if text and not self.compact_status.winfo_ismapped():
+            if text and not self.compact_status.winfo_manager():
                 self.compact_status.pack(fill="x", padx=16, pady=(0, 2), after=self.task_card["wrap"])
-                self._fit_window()
-            elif not text and self.compact_status.winfo_ismapped():
+                if self.active_tab == "codex":
+                    self._fit_window()
+            elif not text and self.compact_status.winfo_manager():
                 self.compact_status.pack_forget()
-                self._fit_window()
+                if self.active_tab == "codex":
+                    self._fit_window()
             elif text != getattr(self, "_compact_status_prev", ""):
-                self._fit_window()
+                if self.active_tab == "codex":
+                    self._fit_window()
             self._compact_status_prev = text
 
     def _row_hover(self, row, on: bool):
@@ -3463,6 +3502,7 @@ class Hud(tk.Tk):
         if self.mode() != "mini":
             self._cfg["expand_mode"] = "detail" if self.mode() == "detail" else "compact"
         self._cfg["mode"] = "mini"
+        self._cfg["mini_providers"] = list(self.mini_providers())
         save_ui_config(self._cfg)
         self.apply_mode()
 
@@ -3475,7 +3515,7 @@ class Hud(tk.Tk):
     def _set_mini_chrome(self, enabled: bool):
         if enabled:
             self.overrideredirect(True)
-            self.configure(bg=CHROMA)
+            self.configure(bg=CHROMA if HAS_PIL else PANEL)
             # Prefer per-pixel alpha; fall back to color-key if layered API fails.
             self._mini_layered = False
             try:
@@ -3483,7 +3523,8 @@ class Hud(tk.Tk):
             except Exception:
                 pass
             self.attributes("-topmost", True)
-            self.after(10, self._enable_layered_style)
+            if HAS_PIL:
+                self.after(10, self._enable_layered_style)
         else:
             self._bind_mini_root(False)
             self._disable_layered_style()
@@ -3629,6 +3670,9 @@ class Hud(tk.Tk):
         self.mini_bar = tk.Frame(self, bg=CHROMA, highlightthickness=0, bd=0)
         self.mini_label = tk.Label(self.mini_bar, bg=CHROMA, bd=0, highlightthickness=0, cursor="hand2")
         self.mini_label.pack(fill="both", expand=True)
+        self._mini_text_cells = []
+        self.mini_options = tk.Button(self.mini_bar, text="☰", command=self._mini_menu, bg=PANEL2, fg=CYAN,
+                                      relief="flat", borderwidth=0, takefocus=True)
         self._mini_photo = None
         self._mini_primary = {}
         self._mini_secondary = {}
@@ -3665,7 +3709,45 @@ class Hud(tk.Tk):
             w.bind("<B1-Motion>", self._mini_motion)
             w.bind("<ButtonRelease-1>", self._mini_release)
 
+    def mini_providers(self):
+        saved = self._cfg.get("mini_providers")
+        providers = tuple(key for key in ("codex", "antigravity") if isinstance(saved, list) and key in saved)
+        return providers or (self.active_tab,)
+
+    def _set_mini_provider(self, provider, enabled):
+        providers = set(self.mini_providers())
+        if enabled:
+            providers.add(provider)
+        else:
+            providers.discard(provider)
+        if not providers:
+            return
+        self._cfg["mini_providers"] = [key for key in ("codex", "antigravity") if key in providers]
+        save_ui_config(self._cfg)
+        self._redraw_capsule()
+        if "antigravity" in providers and time.monotonic() >= self.antigravity.next_refresh:
+            self.antigravity.poll()
+
+    def _mini_menu(self):
+        providers = self.mini_providers()
+        if hasattr(self, "_mini_option_menu"):
+            self._mini_option_menu.destroy()
+        menu = tk.Menu(self, tearoff=False, bg=PANEL2, fg=TEXT, activebackground=SEL_BG, activeforeground=CYAN)
+        self._mini_option_menu = menu
+        menu.add_command(label="选择展示项目" if self.lang() == "zh" else "Choose displayed tools", state="disabled")
+        menu.add_separator()
+        for key, label in (("codex", "Codex"), ("antigravity", "Antigravity")):
+            checked = tk.BooleanVar(master=menu, value=key in providers)
+            menu.add_checkbutton(label=label, variable=checked,
+                                 state="disabled" if providers == (key,) else "normal",
+                                 command=lambda k=key, v=checked: self._set_mini_provider(k, v.get()))
+        menu.tk_popup(self.winfo_rootx() + self.winfo_width() - 34,
+                      self.winfo_rooty() + self.winfo_height())
+
     def _mini_press(self, e):
+        if e.x_root - self.winfo_rootx() >= self.winfo_width() - 34 and e.y_root - self.winfo_rooty() < 34:
+            self._mini_options_pressed = e.widget is not self.mini_options
+            return "break"
         self._drag = {
             "x0": e.x_root,
             "y0": e.y_root,
@@ -3723,6 +3805,11 @@ class Hud(tk.Tk):
             self._present_mini_at(nx, ny)
 
     def _mini_release(self, e):
+        if getattr(self, "_mini_options_pressed", False):
+            self._mini_options_pressed = False
+            if e.x_root - self.winfo_rootx() >= self.winfo_width() - 34 and e.y_root - self.winfo_rooty() < 34:
+                self._mini_menu()
+            return "break"
         if not self._drag:
             return
         moved = bool(self._drag.get("moved"))
@@ -3776,102 +3863,103 @@ class Hud(tk.Tk):
                 continue
         return ImageFont.load_default()
 
-    def _mini_metrics(self) -> tuple[int, int, object, object, list]:
-        """Return w,h, fonts and drawable text clusters based on current values."""
-        # Restore pre-shrink visual type size; keep padding tight (small border).
-        lab_font = self._mini_font(12)
-        pct_font = self._mini_font(13)
-        if self._mini_fault:
-            clusters = [("ERR", RED, pct_font)]
+    def _mini_metrics(self):
+        cadence = ("剩余" if self.lang() == "zh" else "left") + " 5H/7D"
+        rows = []
+        if "codex" in self.mini_providers():
+            cells = [("GPT", TEXT), (cadence, TEXT), ("", MUTED)]
+            if self._mini_fault:
+                cells.append(("ERR", RED))
+            else:
+                remaining = []
+                usage = []
+                for window in (self._mini_primary, self._mini_secondary):
+                    used = window.get("used_percent")
+                    if used is None:
+                        remaining.append("—")
+                    else:
+                        used = max(0.0, min(100.0, float(used)))
+                        usage.append(used)
+                        remaining.append(f"{100 - used:g}%")
+                color = self._pct_color(max(usage)) if usage else MUTED
+                cells.extend(((remaining[0], color), ("/", color), (remaining[1], color)))
+            rows.append(cells)
+        if "antigravity" in self.mini_providers():
+            (gem, gem_quota), (claude, claude_quota) = self.antigravity.mini_values()
+            first, second = gem_quota.split("/")
+            color = MUTED if gem_quota == "—/—" else CYAN
+            rows.append([("ANT", TEXT), (cadence, TEXT), (gem, MUTED),
+                         (first, color), ("/", color), (second, color),
+                         (claude, MUTED), (claude_quota, MUTED if claude_quota == "—/—" else CYAN)])
+
+        if HAS_PIL:
+            font = self._mini_font(12)
+            draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+            def measure(text):
+                return math.ceil(draw.textlength(text, font=font))
         else:
-            p = float((self._mini_primary or {}).get("used_percent") or 0)
-            s = float((self._mini_secondary or {}).get("used_percent") or 0)
-            lab5 = self.t("card5_compact")
-            lab7 = self.t("card7_compact")
-            c5 = f"{p:4.1f}%"
-            c7 = f"{s:4.1f}%"
-            clusters = [
-                (lab5 + " ", MUTED, lab_font),
-                (c5, self._pct_color(p), pct_font),
-                (lab7 + " ", MUTED, lab_font),
-                (c7, self._pct_color(s), pct_font),
-            ]
-            tokens = getattr(self, "_mini_tokens", None)
-            if tokens is not None:
-                # Plain count: no percentage thresholds, normal color (muted when empty).
-                clusters += [
-                    (self.t("mini_tokens") + " ", MUTED, lab_font),
-                    (tokens, MUTED if tokens == "—" else CYAN, pct_font),
-                ]
-        # Measure with a scratch image
-        scratch = ImageDraw.Draw(Image.new("RGB", (8, 8)))
-        widths = []
-        for text, _col, font in clusters:
-            box = scratch.textbbox((0, 0), text, font=font)
-            widths.append(box[2] - box[0])
-        gap = 12
-        pairs = max(1, len(clusters) // 2)
-        content_w = sum(widths) + (0 if self._mini_fault else gap * (pairs - 1))
-        pad_x = 12  # tight side padding
-        pad_y = 6
-        w = content_w + pad_x * 2
-        h = 36  # slim border, fonts stay readable
-        return w, h, lab_font, pct_font, clusters
+            font = self._label_font()
+            measure = font.measure
+        widths = [max(measure(text) for text, _ in column)
+                  for column in zip(*[row + [("", MUTED)] * (8 - len(row)) for row in rows])]
+        for index in (3, 5):
+            if widths[index]:
+                widths[index] = max(widths[index], measure("100%"))
+        if widths[7]:
+            widths[7] = max(widths[7], measure("100%/100%"))
+        starts = []
+        x = 12
+        for index, width in enumerate(widths):
+            starts.append(x)
+            if width:
+                x += width + (0 if index in (3, 4) else 10)
+        height = 36 if len(rows) == 1 else 64
+        positioned = [[(starts[i] + (widths[i] if i == 3 else 0), i == 3, text, color)
+                       for i, (text, color) in enumerate(row) if text] for row in rows]
+        return max(160, x + 34), height, font, positioned
 
     def _redraw_capsule(self):
-        if not hasattr(self, "mini_label"):
+        if not self.is_mini() or not hasattr(self, "mini_label"):
             return
-        if not HAS_PIL:
-            return
-        w, h, lab_font, pct_font, clusters = self._mini_metrics()
-        # Keep Tk geometry matched to bitmap
-        try:
-            self.geometry(f"{w}x{h}+{self.winfo_x()}+{self.winfo_y()}")
-        except Exception:
+        w, h, font, rows = self._mini_metrics()
+        if (w, h) != (self.winfo_width(), self.winfo_height()):
             self.geometry(f"{w}x{h}")
+        positions_y = (h // 2,) if len(rows) == 1 else (17, 47)
+        if not HAS_PIL:
+            self.mini_label.configure(text="", image="", bg=PANEL)
+            cells = [(y, *cell) for y, row in zip(positions_y, rows) for cell in row]
+            while len(self._mini_text_cells) < len(cells):
+                self._mini_text_cells.append(tk.Label(self.mini_bar, bg=PANEL, borderwidth=0, padx=0, pady=0))
+            for widget, (y, x, right, text, color) in zip(self._mini_text_cells, cells):
+                widget.configure(text=text, fg=color, font=font)
+                widget.place(x=x, y=y, anchor="e" if right else "w")
+            for widget in self._mini_text_cells[len(cells):]:
+                widget.place_forget()
+            self.mini_options.place(relx=1, x=-5, y=5, anchor="ne", width=27, height=26)
+            return
 
+        self.mini_options.place_forget()
+        for widget in self._mini_text_cells:
+            widget.place_forget()
         scale = 4
-        W, H = w * scale, h * scale
-        panel = self._hex_rgb(PANEL)
-        outline = self._hex_rgb("#2f5a72")
-        hi = self._hex_rgb("#1a2f42")
-
-        base = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        base = Image.new("RGBA", (w * scale, h * scale), (0, 0, 0, 0))
         draw = ImageDraw.Draw(base)
-        pad = 1 * scale
-        box = [pad, pad, W - pad - 1, H - pad - 1]
-        radius = (box[3] - box[1]) / 2
-        # Slightly translucent outline via dual pass for softer rim
-        draw.rounded_rectangle(box, radius=radius, fill=panel + (255,))
-        draw.rounded_rectangle(box, radius=radius, outline=outline + (160,), width=max(1, scale // 2))
-        ib = [pad + 2 * scale, pad + 2 * scale, W - pad - 1 - 2 * scale, pad + int(8 * scale)]
-        if ib[2] > ib[0] and ib[3] > ib[1]:
-            draw.rounded_rectangle(ib, radius=radius * 0.55, fill=hi + (180,))
-
+        box = (scale, scale, (w - 1) * scale, (h - 1) * scale)
+        draw.rounded_rectangle(box, radius=15 * scale, fill=PANEL, outline="#34546a", width=scale)
         img = base.resize((w, h), Image.Resampling.LANCZOS)
         d = ImageDraw.Draw(img)
-        if self._mini_fault:
-            d.text((w / 2, h / 2), "ERR", fill=self._hex_rgb(RED) + (255,), font=pct_font, anchor="mm")
-        else:
-            scratch = ImageDraw.Draw(Image.new("RGB", (8, 8)))
-            widths = []
-            for text, _col, font in clusters:
-                box = scratch.textbbox((0, 0), text, font=font)
-                widths.append(box[2] - box[0])
-            gap = 12
-            pairs = len(clusters) // 2
-            total = sum(widths) + gap * (pairs - 1)
-            x = (w - total) / 2
-            y = h / 2
-            for i in range(pairs):
-                if i:
-                    x += gap
-                    cx = x - gap / 2
-                    d.ellipse((cx - 1.4, y - 1.4, cx + 1.4, y + 1.4), fill=self._hex_rgb(CYAN_DIM) + (255,))
-                for j in (2 * i, 2 * i + 1):
-                    text, col, font = clusters[j]
-                    d.text((x, y), text, fill=self._hex_rgb(col) + (255,), font=font, anchor="lm")
-                    x += widths[j]
+        if len(rows) == 2:
+            d.line((12, 32, w - 12, 32), fill="#283b50")
+        for y, row in zip(positions_y, rows):
+            for x, right, text, color in row:
+                d.text((x, y), text, fill=color, font=font, anchor="rm" if right else "lm")
+        center_x, center_y = w - 18, 17
+        d.rounded_rectangle((center_x - 12, 5, center_x + 12, 29), radius=6, fill=PANEL2)
+        for dy, offset in ((-3, -2), (3, 2)):
+            y = center_y + dy
+            d.line((center_x - 6, y, center_x + 6, y), fill=MUTED)
+            x = center_x + offset
+            d.ellipse((x - 1.5, y - 1.5, x + 1.5, y + 1.5), fill=CYAN)
 
         self._mini_rgba = img
         self._bind_mini_root(True)
@@ -3896,7 +3984,8 @@ class Hud(tk.Tk):
         self._mini_primary = primary or {}
         self._mini_secondary = secondary or {}
         self._mini_fault = fault
-        self._redraw_capsule()
+        if "codex" in self.mini_providers():
+            self._redraw_capsule()
 
     def apply_mode(self):
         mode = self.mode()
@@ -3904,7 +3993,9 @@ class Hud(tk.Tk):
         if hasattr(self, "mini_bar") and mode != "mini":
             self.mini_bar.pack_forget()
         if mode == "mini":
-            for w in (self.brand.master, self.meta, self.extra_wrap, self.ctrl, self.btns):
+            for frame in (self.toolbar, self.tabs, self.codex_page, self.antigravity):
+                frame.pack_forget()
+            for w in (self.brand.master, self.meta, self.extra_wrap):
                 try:
                     w.pack_forget()
                 except Exception:
@@ -3921,7 +4012,7 @@ class Hud(tk.Tk):
             self._set_mini_chrome(True)
             self._bind_mini_root(True)
             self.minsize(160, 30)
-            self.maxsize(420, 48)
+            self.maxsize(600, 100)
             with self._lock:
                 data = self._data
                 msg = self._msg
@@ -3939,32 +4030,34 @@ class Hud(tk.Tk):
         # Leaving mini: restore normal window chrome + header.
         if hasattr(self, "mini_bar"):
             self.mini_bar.pack_forget()
+        if hasattr(self, "_mini_option_menu"):
+            self._mini_option_menu.unpost()
         self._set_mini_chrome(False)
-        if not self.brand.master.winfo_ismapped():
+        self.toolbar.pack(fill="x", padx=12, pady=(10, 8))
+        self.tabs.pack(fill="x", padx=12, pady=(0, 4))
+        for key, button in self.tab_buttons.items():
+            selected = key == self.active_tab
+            button.configure(bg=PANEL, fg=CYAN if selected else "#aabbce")
+            button.underline.configure(bg=CYAN if selected else PANEL)
+        self.detail_btn.configure(bg="#2a3d50" if mode == "detail" else PANEL2)
+        self.mode_btn.configure(bg="#2a3d50" if mode == "compact" else PANEL2, text=self.t("compact"))
+        if self.active_tab == "antigravity":
+            self.codex_page.pack_forget()
+            self.antigravity.pack(fill="both", expand=True)
+            self.minsize(420, 200)
+            self.maxsize(1400, 1200)
+            self.antigravity.render()
+            self._fit_window()
+            return
+        self.antigravity.pack_forget()
+        self.codex_page.pack(fill="both", expand=True)
+        if not self.brand.master.winfo_manager():
             self.brand.master.pack(fill="x", padx=14, pady=(12, 6))
 
         compact = mode == "compact"
         if compact:
             self.meta.pack_forget()
             self.extra_wrap.pack_forget()
-            self.ctrl.pack_forget()
-            self.btns.pack_forget()
-            if not hasattr(self, "compact_bar"):
-                self.compact_bar = tk.Frame(self, bg=BG)
-                self.compact_sync_btn = self._btn(self.compact_bar, self.t("sync"), self.refresh_now)
-                self.compact_sync_btn.pack(side="left")
-                self.compact_mini_btn = self._btn(self.compact_bar, self.t("mini"), self.enter_mini)
-                self.compact_mini_btn.pack(side="right")
-                self.compact_mode_btn = self._btn(self.compact_bar, self.t("detail"), self.toggle_mode)
-                self.compact_mode_btn.pack(side="right", padx=(0, 8))
-            else:
-                self.compact_sync_btn.configure(text=self.t("sync"))
-                self.compact_mode_btn.configure(text=self.t("detail"))
-                if hasattr(self, "compact_mini_btn"):
-                    self.compact_mini_btn.configure(text=self.t("mini"))
-                else:
-                    self.compact_mini_btn = self._btn(self.compact_bar, self.t("mini"), self.enter_mini)
-                    self.compact_mini_btn.pack(side="right")
             self.card5["title"].configure(text=self.t("card5_compact"))
             self.card7["title"].configure(text=self.t("card7_compact"))
             self.task_card["title"].configure(text=self.t("task_card_compact"))
@@ -3972,7 +4065,6 @@ class Hud(tk.Tk):
             self.card7["wrap"].pack(fill="x", padx=14, pady=(2, 4))
             self.task_card["wrap"].pack(fill="x", padx=14, pady=(2, 4))
             self.tasks_sec["wrap"].pack_forget()
-            self.compact_bar.pack(fill="x", padx=14, pady=(4, 10))
             self.minsize(300, 200)
             self.maxsize(560, 480)
         else:
@@ -3994,9 +4086,7 @@ class Hud(tk.Tk):
             else:
                 self.tasks_sec["wrap"].pack_forget()
             self.extra_wrap.pack(fill="both", expand=True, padx=14, pady=(0, 8))
-            self.ctrl.pack(fill="x", padx=14, pady=(0, 6))
-            self.btns.pack(fill="x", padx=14, pady=(0, 12))
-            self.mode_btn.configure(text=self.t("compact"))
+
             if hasattr(self, "mini_btn"):
                 self.mini_btn.configure(text=self.t("mini"))
         pad = (4, 6) if compact else (6, 10)
@@ -4038,8 +4128,9 @@ class Hud(tk.Tk):
             pos = f"+{parts[1]}+{parts[2]}" if len(parts) >= 3 else ""
         except Exception:
             pos = ""
-        self.geometry(f"{w}x{h}{pos}")
-        self.after(50, self._publish_hwnd)
+        if (w, h) != (self.winfo_width(), self.winfo_height()):
+            self.geometry(f"{w}x{h}{pos}")
+            self.after(50, self._publish_hwnd)
 
     def _publish_hwnd(self):
         try:
@@ -4048,6 +4139,10 @@ class Hud(tk.Tk):
             parent = ctypes.windll.user32.GetParent(hwnd)
             if parent:
                 hwnd = int(parent)
+            if not self.is_mini():
+                enabled = ctypes.c_int(1)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    ctypes.c_void_p(hwnd), 20, ctypes.byref(enabled), ctypes.sizeof(enabled))
             HWND_PATH.write_text(str(int(hwnd)), encoding="utf-8")
         except Exception:
             pass

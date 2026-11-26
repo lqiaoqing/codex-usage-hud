@@ -9,3 +9,7 @@ Thumbs.db
 .env
 .env.*
 *.local.json
+antigravity-hud/bin/
+antigravity-hud/obj/
+antigravity-hud/publish/
+antigravity-hud/runtime/
