@@ -9,7 +9,7 @@
 
 ## 构建额度组件
 
-额度需要支持 JSON 用量输出的 [Antigravity CLI](https://antigravity.google/download)，最低版本 1.2.15。HUD 会查找官方用户安装路径、`antigravity-hud/runtime/agy.exe` 和 PATH。
+额度需要支持 JSON 用量输出的 [Antigravity CLI](https://antigravity.google/download)，最低版本 1.2.15。HUD 依次查找官方用户安装路径、`antigravity-hud/runtime/agy.exe`、PATH 和 T3 Code 托管的 Antigravity CLI。T3 Code 的当前版本由 `~/.t3/tools/antigravity-acp/win32-*/active.json` 指定。使用这个可执行文件时，HUD 仍使用标准 CLI 登录。T3 Code 里的登录单独保存。
 
 在仓库根目录执行以下构建命令可启用桌面会话跟随和「打开用量页」。运行主面板需要 Python 和 tkinter，该桌面辅助组件另需 .NET 10 Desktop Runtime。构建需要 .NET 10 SDK。
 

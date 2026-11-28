@@ -6,6 +6,7 @@ from functools import lru_cache
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import sqlite3
@@ -22,11 +23,30 @@ GUID = re.compile(r"[0-9a-f-]{36}", re.I)
 BG, CARD, TEXT, DIM, MINT, WARN = "#0d141f", "#151f2d", "#edf3f9", "#aabbce", "#59dec2", "#ffc277"
 
 
+def t3_cli_path(home):
+    architecture = {"amd64": "x64", "arm64": "arm64"}.get(platform.machine().lower())
+    if not architecture:
+        return None
+    root = home / ".t3" / "tools" / "antigravity-acp" / f"win32-{architecture}"
+    try:
+        active = json.loads((root / "active.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    release_id = active.get("releaseId") if isinstance(active, dict) else None
+    if isinstance(release_id, str) and re.fullmatch(r"[0-9a-f]{64}", release_id):
+        executable = root / "versions" / release_id / "agy.exe"
+        if executable.is_file():
+            return executable
+    return None
+
+
 def cli_path():
-    installed = Path.home() / "AppData" / "Local" / "agy" / "bin" / "agy.exe"
+    home = Path.home()
+    installed = home / "AppData" / "Local" / "agy" / "bin" / "agy.exe"
     bundled = HELPER_DIR / "runtime" / "agy.exe"
     found = shutil.which("agy.exe")
-    return next((p for p in (installed, bundled, Path(found) if found else None) if p and p.is_file()), None)
+    executable = next((p for p in (installed, bundled, Path(found) if found else None) if p and p.is_file()), None)
+    return executable or t3_cli_path(home)
 
 
 @lru_cache(maxsize=4)
@@ -102,7 +122,8 @@ def read_cli_quota(zh, proxy=None):
     if groups:
         return groups, ""
     diagnostic = (run.stderr + run.stdout).decode("utf-8", "replace").lower()
-    if any(message in diagnostic for message in ("not logged in", "not authenticated", "agy login", "sign in", "no credentials")):
+    if any(message in diagnostic for message in ("not logged in", "not authenticated", "authentication required",
+                                                "agy login", "sign in", "no credentials")):
         return [], "请先登录 Antigravity CLI" if zh else "Sign in to Antigravity CLI first"
     return [], "Antigravity CLI 未返回额度" if zh else "Antigravity CLI returned no quota"
 
